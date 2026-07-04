@@ -7,7 +7,10 @@
 #include "ZoneGraphTypes.h"
 #include "RammsCrowdTypes.generated.h"
 
+class UAnimInstance;
 class UMassEntityConfigAsset;
+class URammsCrowdReactionProfile;
+class USkeletalMesh;
 
 UENUM(BlueprintType)
 enum class ERammsCrowdActorKind : uint8
@@ -89,9 +92,47 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Crowd", meta = (ClampMin = "0.01"))
 	float DefaultCountScale = 1.0f;
 
+	/** Navigation/avoidance footprint radius, cm. Mirror into the entity config's RAMMS Crowd Agent trait. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Crowd|Movement", meta = (ClampMin = "1.0"))
+	float AgentRadiusCm = 35.0f;
+
+	/** Desired walk speed range, cm/s. Mirror into the movement trait's desired-speed variations. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Crowd|Movement")
+	FFloatInterval WalkSpeedRangeCmS = FFloatInterval(100.0f, 160.0f);
+
+	/** Stride/cadence variation scalar 0..1 consumed by the crowd AnimBP. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Crowd|Movement", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float GaitVariation = 0.25f;
+
+	/** Skeletal mesh used by the high-LOD representation actor for this kind. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Crowd|Visuals")
+	TSoftObjectPtr<USkeletalMesh> DisplayMesh;
+
+	/** AnimBP class used by the high-LOD representation actor for this kind. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Crowd|Visuals")
+	TSoftClassPtr<UAnimInstance> AnimClass;
+
+	/** Reaction tuning for this kind. Mirror into the entity config's RAMMS Crowd Reaction trait. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Crowd|Reactions")
+	TObjectPtr<URammsCrowdReactionProfile> ReactionProfile;
+
 	UFUNCTION(BlueprintPure, Category = "Ramms|Crowd")
 	bool IsConfigured() const
 	{
 		return MassEntityConfig.IsNull() == false;
 	}
+};
+
+/** One profile entry in a multi-kind crowd spawner, mixed by proportion. */
+USTRUCT(BlueprintType)
+struct RAMMSCROWD_API FRammsCrowdProfileEntry
+{
+	GENERATED_BODY()
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Crowd")
+	TObjectPtr<URammsCrowdAgentProfile> Profile;
+
+	/** Relative share of the crowd spawned as this kind (normalized across entries). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Crowd", meta = (ClampMin = "0.0"))
+	float Proportion = 1.0f;
 };

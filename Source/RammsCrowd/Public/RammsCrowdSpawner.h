@@ -29,6 +29,10 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Ramms|Crowd")
 	TObjectPtr<URammsCrowdAgentProfile> CrowdProfile = nullptr;
 
+	/** Optional multi-kind crowd: when non-empty, these profiles (mixed by proportion) are used instead of CrowdProfile. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Ramms|Crowd")
+	TArray<FRammsCrowdProfileEntry> CrowdProfiles;
+
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Ramms|Crowd", meta = (ClampMin = "0"))
 	int32 DesiredCount = 20;
 
@@ -69,6 +73,8 @@ public:
 	void SetDesiredCountScale(float NewScale);
 
 private:
+	/** All configured profiles with proportions: CrowdProfiles when non-empty, else CrowdProfile at 1.0. */
+	TArray<FRammsCrowdProfileEntry>	   GatherProfileEntries() const;
 	bool							   CanUseMassSpawnerWorldApis() const;
 	void							   ResetCrowdConfiguration();
 	void							   ValidateConfiguredEntityTypes();

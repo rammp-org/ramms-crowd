@@ -66,8 +66,41 @@ void ARammsCrowdSpawner::PostEditChangeProperty(FPropertyChangedEvent& PropertyC
 }
 #endif
 
+TArray<FRammsCrowdProfileEntry> ARammsCrowdSpawner::GatherProfileEntries() const
+{
+	TArray<FRammsCrowdProfileEntry> Entries;
+	if (CrowdProfiles.IsEmpty() == false)
+	{
+		for (const FRammsCrowdProfileEntry& Entry : CrowdProfiles)
+		{
+			if (Entry.Profile != nullptr && Entry.Profile->IsConfigured() && Entry.Proportion > 0.0f)
+			{
+				Entries.Add(Entry);
+			}
+		}
+	}
+	else if (CrowdProfile != nullptr && CrowdProfile->IsConfigured())
+	{
+		FRammsCrowdProfileEntry& Entry = Entries.AddDefaulted_GetRef();
+		Entry.Profile = CrowdProfile;
+		Entry.Proportion = 1.0f;
+	}
+	return Entries;
+}
+
 bool ARammsCrowdSpawner::HasValidCrowdProfile(FString& OutIssue) const
 {
+	if (CrowdProfiles.IsEmpty() == false)
+	{
+		if (GatherProfileEntries().IsEmpty())
+		{
+			OutIssue = TEXT("CrowdProfiles has no entry with a configured MassEntityConfig and a positive proportion.");
+			return false;
+		}
+		OutIssue.Reset();
+		return true;
+	}
+
 	if (CrowdProfile == nullptr)
 	{
 		OutIssue = TEXT("CrowdProfile is not assigned.");
@@ -197,19 +230,18 @@ void ARammsCrowdSpawner::SetDesiredCountScale(float NewScale)
 
 void ARammsCrowdSpawner::ConfigureEntityTypes()
 {
-	if (CrowdProfile == nullptr)
+	for (const FRammsCrowdProfileEntry& Entry : GatherProfileEntries())
 	{
-		return;
+		FMassSpawnedEntityType& EntityType = EntityTypes.AddDefaulted_GetRef();
+		EntityType.EntityConfig = Entry.Profile->MassEntityConfig;
+		EntityType.Proportion = Entry.Proportion;
+
+		UE_LOG(LogRammsCrowd, Display, TEXT("[%s] Configured entity type from profile '%s' with config '%s' (proportion %.2f)"),
+			*GetName(),
+			*GetNameSafe(Entry.Profile),
+			*Entry.Profile->MassEntityConfig.ToSoftObjectPath().ToString(),
+			Entry.Proportion);
 	}
-
-	FMassSpawnedEntityType& EntityType = EntityTypes.AddDefaulted_GetRef();
-	EntityType.EntityConfig = CrowdProfile->MassEntityConfig;
-	EntityType.Proportion = 1.0f;
-
-	UE_LOG(LogRammsCrowd, Display, TEXT("[%s] Configured entity type from profile '%s' with config '%s'"),
-		*GetName(),
-		*GetNameSafe(CrowdProfile),
-		*CrowdProfile->MassEntityConfig.ToSoftObjectPath().ToString());
 }
 
 void ARammsCrowdSpawner::ConfigureSpawnGenerators()
@@ -263,7 +295,8 @@ int32 ARammsCrowdSpawner::GetEffectiveDesiredCount() const
 		return DesiredCount;
 	}
 
-	return CrowdProfile != nullptr ? CrowdProfile->DefaultCount : 0;
+	const TArray<FRammsCrowdProfileEntry> Entries = GatherProfileEntries();
+	return Entries.IsEmpty() == false ? Entries[0].Profile->DefaultCount : 0;
 }
 
 float ARammsCrowdSpawner::GetEffectiveDesiredCountScale() const
@@ -273,7 +306,8 @@ float ARammsCrowdSpawner::GetEffectiveDesiredCountScale() const
 		return DesiredCountScale;
 	}
 
-	return CrowdProfile != nullptr ? CrowdProfile->DefaultCountScale : 1.0f;
+	const TArray<FRammsCrowdProfileEntry> Entries = GatherProfileEntries();
+	return Entries.IsEmpty() == false ? Entries[0].Profile->DefaultCountScale : 1.0f;
 }
 
 void ARammsCrowdSpawner::ValidateConfiguredEntityTypes()
