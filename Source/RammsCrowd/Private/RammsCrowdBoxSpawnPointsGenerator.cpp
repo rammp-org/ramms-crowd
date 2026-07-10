@@ -110,5 +110,11 @@ void URammsCrowdBoxSpawnPointsGenerator::Generate(UObject& QueryOwner, TConstArr
 		*GetNameSafe(&QueryOwner),
 		AcceptedLocations.Num(),
 		Results.Num());
+	constexpr int32 MaxLoggedLocations = 5;
+	for (int32 LocationIndex = 0; LocationIndex < FMath::Min(AcceptedLocations.Num(), MaxLoggedLocations); ++LocationIndex)
+	{
+		UE_LOG(LogRammsCrowd, Display, TEXT("[%s]   spawn point %d: %s"),
+			*GetNameSafe(&QueryOwner), LocationIndex, *AcceptedLocations[LocationIndex].ToCompactString());
+	}
 	FinishedGeneratingSpawnPointsDelegate.Execute(Results);
 }

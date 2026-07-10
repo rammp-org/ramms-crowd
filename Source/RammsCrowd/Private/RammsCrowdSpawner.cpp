@@ -4,8 +4,13 @@
 
 #include "MassActorSubsystem.h"
 #include "MassCommonFragments.h"
+#include "MassCrowdMemberTrait.h"
+#include "MassCrowdVisualizationTrait.h"
 #include "MassEntityConfigAsset.h"
+#include "MassEntitySubsystem.h"
 #include "MassLODFragments.h"
+#include "MassLODSubsystem.h"
+#include "TimerManager.h"
 #include "MassRepresentationFragments.h"
 #include "MassRepresentationProcessor.h"
 #include "MassSpawnerTypes.h"
@@ -405,12 +410,115 @@ void ARammsCrowdSpawner::ValidateConfiguredEntityTypes()
 				*GetName(),
 				*GetNameSafe(EntityConfig));
 		}
+
+		// UE 5.7: the base visualization LOD/representation processors have
+		// bAutoRegisterWithProcessingPhases=false — the only auto-registered
+		// implementations ship in MassCrowd and only match FMassCrowdTag
+		// entities. A config with a visualization trait but no crowd-member
+		// trait spawns entities that never get an LOD or representation.
+		if (VisualizationTrait != nullptr)
+		{
+			if (EntityConfig->FindTrait(UMassCrowdMemberTrait::StaticClass(), false) == nullptr)
+			{
+				UE_LOG(LogRammsCrowd, Warning, TEXT("[%s] MassEntityConfig '%s' has a visualization trait but no 'Mass Crowd Member' trait. In UE 5.7 only MassCrowd's visualization processors auto-register and they require FMassCrowdTag — without the Crowd Member trait entities stay Rep=None/LOD=Max and never render."),
+					*GetName(),
+					*GetNameSafe(EntityConfig));
+			}
+
+			if (VisualizationTrait->IsA<UMassCrowdVisualizationTrait>() == false)
+			{
+				UE_LOG(LogRammsCrowd, Warning, TEXT("[%s] MassEntityConfig '%s' uses visualization trait '%s'. Crowd entities should use 'Mass Crowd Visualization' (UMassCrowdVisualizationTrait): it sets LODParams.FilterTag=FMassCrowdTag (required by the crowd LOD processor) and the crowd representation subsystem."),
+					*GetName(),
+					*GetNameSafe(EntityConfig),
+					*GetNameSafe(VisualizationTrait->GetClass()));
+			}
+		}
 	}
 }
 
 void ARammsCrowdSpawner::HandleSpawningFinished()
 {
 	UE_LOG(LogRammsCrowd, Display, TEXT("[%s] Mass spawning finished"), *GetName());
+
+	// Audit after the LOD/visualization processors have had time to run a few
+	// frames; distinguishes "entities culled/at wrong LOD" from "processors
+	// never ran" when the crowd is invisible.
+	GetWorldTimerManager().SetTimer(SpawnAuditTimerHandle, this, &ARammsCrowdSpawner::LogSpawnedEntityAudit, 2.0f, /*bLoop*/ false);
+}
+
+void ARammsCrowdSpawner::LogSpawnedEntityAudit()
+{
+	const UWorld* World = GetWorld();
+	const UMassEntitySubsystem* EntitySubsystem = World ? World->GetSubsystem<UMassEntitySubsystem>() : nullptr;
+	if (EntitySubsystem == nullptr)
+	{
+		UE_LOG(LogRammsCrowd, Warning, TEXT("[%s] Entity audit: no MassEntitySubsystem"), *GetName());
+		return;
+	}
+
+	if (const UMassLODSubsystem* LODSubsystem = World->GetSubsystem<UMassLODSubsystem>())
+	{
+		UE_LOG(LogRammsCrowd, Display, TEXT("[%s] Entity audit: LOD subsystem has %d registered viewers"),
+			*GetName(), LODSubsystem->GetViewers().Num());
+	}
+	else
+	{
+		UE_LOG(LogRammsCrowd, Warning, TEXT("[%s] Entity audit: no MassLODSubsystem — all LOD calculations default to Off"), *GetName());
+	}
+
+	auto LodToString = [](const EMassLOD::Type Lod) -> const TCHAR* {
+		switch (Lod)
+		{
+			case EMassLOD::High: return TEXT("High");
+			case EMassLOD::Medium: return TEXT("Medium");
+			case EMassLOD::Low: return TEXT("Low");
+			case EMassLOD::Off: return TEXT("Off");
+			default: return TEXT("Max/unset");
+		}
+	};
+
+	const FMassEntityManager& EntityManager = EntitySubsystem->GetEntityManager();
+	int32 TotalEntities = 0;
+	for (const FSpawnedEntities& Spawned : AllSpawnedEntities)
+	{
+		TotalEntities += Spawned.Entities.Num();
+	}
+
+	constexpr int32 MaxAuditedEntities = 5;
+	UE_LOG(LogRammsCrowd, Display, TEXT("[%s] Entity audit: %d spawned entities tracked, showing up to %d"),
+		*GetName(), TotalEntities, MaxAuditedEntities);
+
+	int32 AuditedCount = 0;
+	for (const FSpawnedEntities& Spawned : AllSpawnedEntities)
+	{
+		for (const FMassEntityHandle Entity : Spawned.Entities)
+		{
+			if (AuditedCount >= MaxAuditedEntities)
+			{
+				return;
+			}
+			++AuditedCount;
+
+			if (!EntityManager.IsEntityValid(Entity))
+			{
+				UE_LOG(LogRammsCrowd, Warning, TEXT("[%s]   entity %d: INVALID handle"), *GetName(), AuditedCount - 1);
+				continue;
+			}
+
+			const FTransformFragment* TransformFragment = EntityManager.GetFragmentDataPtr<FTransformFragment>(Entity);
+			const FMassRepresentationFragment* Representation = EntityManager.GetFragmentDataPtr<FMassRepresentationFragment>(Entity);
+			const FMassRepresentationLODFragment* RepresentationLOD = EntityManager.GetFragmentDataPtr<FMassRepresentationLODFragment>(Entity);
+			const FMassViewerInfoFragment* ViewerInfo = EntityManager.GetFragmentDataPtr<FMassViewerInfoFragment>(Entity);
+
+			UE_LOG(LogRammsCrowd, Display, TEXT("[%s]   entity %d: Loc=%s Rep=%s LOD=%s ViewerDist=%s"),
+				*GetName(),
+				AuditedCount - 1,
+				TransformFragment ? *TransformFragment->GetTransform().GetLocation().ToCompactString() : TEXT("<no transform fragment>"),
+				Representation ? *LexToString(Representation->CurrentRepresentation) : TEXT("<no representation fragment>"),
+				RepresentationLOD ? LodToString(RepresentationLOD->LOD) : TEXT("<no LOD fragment>"),
+				ViewerInfo ? *FString::Printf(TEXT("%.0f"), FMath::Sqrt(ViewerInfo->ClosestViewerDistanceSq)) : TEXT("<no viewer fragment>"));
+		}
+	}
 }
 
 void ARammsCrowdSpawner::HandleDespawningFinished()

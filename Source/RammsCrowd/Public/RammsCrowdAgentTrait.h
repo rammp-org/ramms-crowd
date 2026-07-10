@@ -27,6 +27,15 @@ struct RAMMSCROWD_API FRammsCrowdProfileParameters : public FMassConstSharedFrag
 	/** Scalar 0..1 the animation layer can use for stride/cadence variation. */
 	UPROPERTY(EditAnywhere, Category = "Ramms|Crowd", meta = (ClampMin = "0.0", ClampMax = "1.0"))
 	float GaitVariation = 0.25f;
+
+	/**
+	 * Extra yaw applied when syncing the entity transform to a spawned representation
+	 * actor. Use when the character mesh IS the actor's root component and so cannot
+	 * carry its own rotation offset (e.g. City Sample crowd characters, authored
+	 * facing +Y, need -90).
+	 */
+	UPROPERTY(EditAnywhere, Category = "Ramms|Crowd", meta = (ClampMin = "-180.0", ClampMax = "180.0"))
+	float RepresentationActorYawOffsetDegrees = 0.0f;
 };
 
 /**

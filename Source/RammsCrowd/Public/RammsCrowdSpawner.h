@@ -89,4 +89,9 @@ private:
 
 	UFUNCTION()
 	void HandleDespawningFinished();
+
+	/** Logs LOD/representation state of spawned entities shortly after spawn (diagnoses invisible crowds). */
+	void LogSpawnedEntityAudit();
+
+	FTimerHandle SpawnAuditTimerHandle;
 };

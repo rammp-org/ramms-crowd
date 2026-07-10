@@ -87,7 +87,10 @@ void URammsCrowdStimulusProcessor::ConfigureQueries(const TSharedRef<FMassEntity
 	EntityQuery.AddRequirement<FMassVelocityFragment>(EMassFragmentAccess::ReadOnly);
 	EntityQuery.AddConstSharedRequirement<FRammsReactionParamsFragment>();
 	EntityQuery.AddSubsystemRequirement<URammsStimulusSubsystem>(EMassFragmentAccess::ReadOnly);
-	EntityQuery.AddSubsystemRequirement<UMassSignalSubsystem>(EMassFragmentAccess::ReadWrite);
+	// The signal subsystem is used AFTER chunk iteration (batched signals), so it must
+	// be registered on ProcessorRequirements: EntityQuery-level subsystem requirements
+	// are only accessible inside ForEachEntityChunk.
+	ProcessorRequirements.AddSubsystemRequirement<UMassSignalSubsystem>(EMassFragmentAccess::ReadWrite);
 }
 
 void URammsCrowdStimulusProcessor::Execute(FMassEntityManager& EntityManager, FMassExecutionContext& Context)
