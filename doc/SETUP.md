@@ -14,9 +14,24 @@ For customizing appearance, animation, and behavior after setup, see
 
 - Enable the `RammsCrowd` plugin (pulls in MassGameplay, MassAI, MassCrowd, StateTree,
   ZoneGraph, ZoneGraphAnnotations).
-- **Character content** (for the high-detail representation): the reference setup uses
-  Epic's free **City Sample Crowds** pack from Fab, installed at
-  `/Game/CitySampleCrowd`. Any skeletal mesh + idle/walk animations work instead — see
+- **Character content — install once, everything else is automatic.** The reference
+  setup uses Epic's free **City Sample Crowds** pack. It is deliberately NOT committed
+  to the repository (multi-GB, and the Fab license means each user claims it
+  themselves): install it via **Epic Games Launcher → Fab Library → City Sample
+  Crowds → Add to Project**, then restart the editor.
+
+  On every editor startup the plugin's bootstrap (`Content/Python/init_unreal.py`)
+  checks the pack: if it is at Fab's default install path it is migrated automatically
+  to `/Game/Fab/CitySampleCrowd` (where the crowd assets reference it — one-time, a
+  few minutes, with toast notifications for start/finish); if it is missing entirely,
+  an editor toast with a link to the Fab listing (plus a log warning for headless
+  runs) explains the install step, and the crowd falls back to proxy meshes — agents
+  still simulate, and the spawner also warns when its template actor cannot resolve.
+  When everything is in place the bootstrap stays silent apart from one log line. The
+  optional `ramms_crowd_cleanup_citysample.py` removes migration leftovers at the old
+  path (cosmetic — they are harmless and git-ignored).
+
+  Any skeletal mesh + idle/walk animations work instead of the pack — see
   CUSTOMIZATION.md §"Swapping the people".
 
 ## 1. Project configuration

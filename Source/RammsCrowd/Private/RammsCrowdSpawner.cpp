@@ -402,6 +402,19 @@ void ARammsCrowdSpawner::ValidateConfiguredEntityTypes()
 					*GetName(),
 					*GetNameSafe(EntityConfig));
 			}
+
+			// A null HighRes template with HighResSpawnedActor requested usually means
+			// the template blueprint failed to LOAD — e.g. its parent class lives in a
+			// content pack that is not installed (City Sample Crowds is not committed
+			// to the repo; the RammsCrowd startup script validates it). Agents fall
+			// back to proxy meshes instead of crashing, but say why loudly.
+			if (VisualizationTrait->Params.LODRepresentation[EMassLOD::High] == EMassRepresentationType::HighResSpawnedActor
+				&& VisualizationTrait->HighResTemplateActor.Get() == nullptr)
+			{
+				UE_LOG(LogRammsCrowd, Warning, TEXT("[%s] MassEntityConfig '%s' wants HighRes spawned actors but HighResTemplateActor did not resolve. If the template derives from City Sample content, the pack is probably not installed — see RammsCrowd doc/SETUP.md §0. Agents will render as proxy meshes only."),
+					*GetName(),
+					*GetNameSafe(EntityConfig));
+			}
 		}
 
 		if (EntityConfig->FindTrait(URammsMassRepresentationSupportTrait::StaticClass(), false) == nullptr)

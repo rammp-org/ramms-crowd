@@ -18,6 +18,7 @@ public class RammsCrowdEditor : ModuleRules
 		PrivateDependencyModuleNames.AddRange(new string[]
 		{
 			"AssetRegistry",
+			"AssetTools",
 			"MassAIBehavior",
 			"MassCrowd",
 			"MassEntity",
@@ -25,11 +26,14 @@ public class RammsCrowdEditor : ModuleRules
 			"MassMovement",
 			"PropertyBindingUtils",
 			"RammsCrowd",
+			"Slate",
+			"SlateCore",
 			"StateTreeModule",
 			"StateTreeEditorModule",
 			"TargetPlatform",
 			"TextureUtilitiesCommon",
 			"UnrealEd",
+			"VirtualTexturingEditor",
 			"ZoneGraph",
 		});
 	}

@@ -31,6 +31,9 @@ representation for camera/ToF/sonar simulation.
 - **Scripted authoring** — editor utilities (StateTree scaffolding, blend-space
   resampling, ZoneGraph shape/build helpers) that make the whole system authorable via
   Python / Remote Control.
+- **Self-bootstrapping content** — large marketplace character packs stay out of git;
+  a startup script validates the (free) City Sample Crowds install, auto-migrates it
+  to the expected path, and degrades gracefully to proxy meshes when it is absent.
 
 Requires the (Experimental) engine plugins: MassGameplay, MassAI, MassCrowd, StateTree,
 ZoneGraph, ZoneGraphAnnotations.
