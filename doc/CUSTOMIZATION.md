@@ -125,6 +125,36 @@ Recipes:
   robots), or push snapshots into `URammsStimulusSubsystem` directly for virtual
   stimuli.
 
+## Seated people (`URammsSeatComponent`)
+
+Puts a posed skeletal-mesh occupant into any seat — the wheelchair, benches,
+vehicle seats. Add the component to the actor, position it at the seat surface
+(component transform = seat origin, X forward / Z up), done: on BeginPlay it
+spawns the occupant, attaches it, disables its collision/physics, and applies a
+parametric seated pose.
+
+- **Occupants**: City Sample crowd characters by default (optionally
+  appearance-randomized per spawn; soft-referenced, so a missing pack logs a
+  warning and leaves the seat empty instead of failing), or any skeletal mesh
+  via `ExplicitMesh` mode.
+- **The pose is data**: `PoseBoneOffsets` is a bone-name → rotation map applied
+  over the reference pose (`URammsSeatedPoseAnimInstance` — no anim graph, no
+  authored sit animation needed, skeleton-agnostic since missing bones skip).
+  Tune it live in the details panel; changes re-apply immediately, including in
+  PIE. Different seats can carry different poses.
+- **Axis semantics** (UE-standard skeletons — City Sample, mannequin; bones have
+  X along the bone): **Yaw = flexion/bend** (hip, knee, elbow, spine fwd/back),
+  **Pitch = lateral swing** (arm abduction, spine side-lean), **Roll = twist
+  about the bone's own long axis**. A pure Roll moves no child joint — it looks
+  exactly like "the pose isn't applying", so if a limb won't bend, check that
+  the offset isn't in Roll. Signs are identical on both body sides (mirrored
+  bone frames).
+- **Editor preview**: `Spawn Occupant` / `Clear Occupant` / `Apply Pose` buttons
+  on the component work without PIE (preview occupants are transient — never
+  saved into the map).
+- Upgrade path: hand/foot IK fitting (armrests, joystick, footplates) can layer
+  on later; the pose map remains the base layer.
+
 ## Scripted authoring (Python / Remote Control)
 
 Everything above can be driven headlessly — the plugin's editor module ships utilities
