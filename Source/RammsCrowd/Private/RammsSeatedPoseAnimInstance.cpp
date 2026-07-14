@@ -76,7 +76,6 @@ bool FRammsSeatedPoseProxy::Evaluate(FPoseContext& Output)
 {
 	Output.ResetToRefPose();
 
-	int32 Applied = 0;
 	const FBoneContainer& Bones = Output.Pose.GetBoneContainer();
 	for (const TPair<FName, FQuat>& Offset : Offsets)
 	{
@@ -92,7 +91,6 @@ bool FRammsSeatedPoseProxy::Evaluate(FPoseContext& Output)
 		}
 		FTransform& BoneTransform = Output.Pose[CompactIndex];
 		BoneTransform.SetRotation(BoneTransform.GetRotation() * Offset.Value);
-		++Applied;
 	}
 	return true;
 }

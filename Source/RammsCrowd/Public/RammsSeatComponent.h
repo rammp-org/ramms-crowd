@@ -8,6 +8,10 @@
 
 class USkeletalMesh;
 class USkeletalMeshComponent;
+#if WITH_EDITOR
+class FProperty;
+struct FPropertyChangedEvent;
+#endif
 
 UENUM(BlueprintType)
 enum class ERammsSeatOccupantMode : uint8
