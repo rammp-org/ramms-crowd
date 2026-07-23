@@ -17,8 +17,14 @@ public class RammsCrowdEditor : ModuleRules
 
 		PrivateDependencyModuleNames.AddRange(new string[]
 		{
+			"AnimGraph",
+			"AnimGraphRuntime",
+			"AnimationCore",
+			"AnimationWarpingEditor",
+			"AnimationWarpingRuntime",
 			"AssetRegistry",
 			"AssetTools",
+			"BlueprintGraph",
 			"MassAIBehavior",
 			"MassCrowd",
 			"MassEntity",
