@@ -1,6 +1,7 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "RammsFootPlacement.h"
+#include "Kismet/KismetMathLibrary.h" // RAMMS: explicit IWYU (upstream relies on its header including this)
 #include "Animation/AnimNodeFunctionRef.h"
 #include "Animation/AnimTrace.h"
 #include "AnimationRuntime.h"

@@ -2,6 +2,8 @@
 
 #include "RammsCrowdAnimAssetLibrary.h"
 
+#include "RammsCrowdEditorLog.h"
+
 #include "Animation/AnimBlueprint.h"
 #include "Animation/BlendSpace.h"
 #include "AnimGraphNode_LinkedInputPose.h"
@@ -31,7 +33,7 @@ UAnimBlueprint* URammsCrowdAnimAssetLibrary::CreateFootPlacementPostProcessAnimB
 {
 	if (Skeleton == nullptr)
 	{
-		UE_LOG(LogTemp, Error, TEXT("CreateFootPlacementPostProcessAnimBlueprint: Skeleton is null."));
+		UE_LOG(LogRammsCrowdEditor, Error, TEXT("CreateFootPlacementPostProcessAnimBlueprint: Skeleton is null."));
 		return nullptr;
 	}
 
@@ -52,7 +54,7 @@ UAnimBlueprint* URammsCrowdAnimAssetLibrary::CreateFootPlacementPostProcessAnimB
 	}
 	if (AnimBP == nullptr)
 	{
-		UE_LOG(LogTemp, Error, TEXT("CreateFootPlacementPostProcessAnimBlueprint: failed to create %s/%s."), *PackagePath, *AssetName);
+		UE_LOG(LogRammsCrowdEditor, Error, TEXT("CreateFootPlacementPostProcessAnimBlueprint: failed to create %s/%s."), *PackagePath, *AssetName);
 		return nullptr;
 	}
 
@@ -60,6 +62,8 @@ UAnimBlueprint* URammsCrowdAnimAssetLibrary::CreateFootPlacementPostProcessAnimB
 	UEdGraph* AnimGraph = nullptr;
 	for (UEdGraph* Graph : AnimBP->FunctionGraphs)
 	{
+		// UEdGraph::Schema is a TSubclassOf (a UClass*), so UClass::IsChildOf is
+		// the correct schema test here.
 		if (Graph != nullptr && Graph->Schema != nullptr && Graph->Schema->IsChildOf(UAnimationGraphSchema::StaticClass()))
 		{
 			AnimGraph = Graph;
@@ -68,7 +72,7 @@ UAnimBlueprint* URammsCrowdAnimAssetLibrary::CreateFootPlacementPostProcessAnimB
 	}
 	if (AnimGraph == nullptr)
 	{
-		UE_LOG(LogTemp, Error, TEXT("CreateFootPlacementPostProcessAnimBlueprint: %s has no anim graph."), *AssetName);
+		UE_LOG(LogRammsCrowdEditor, Error, TEXT("CreateFootPlacementPostProcessAnimBlueprint: %s has no anim graph."), *AssetName);
 		return nullptr;
 	}
 
@@ -84,7 +88,7 @@ UAnimBlueprint* URammsCrowdAnimAssetLibrary::CreateFootPlacementPostProcessAnimB
 	AnimGraph->GetNodesOfClass(RootNodes);
 	if (RootNodes.Num() == 0)
 	{
-		UE_LOG(LogTemp, Error, TEXT("CreateFootPlacementPostProcessAnimBlueprint: %s anim graph has no output node."), *AssetName);
+		UE_LOG(LogRammsCrowdEditor, Error, TEXT("CreateFootPlacementPostProcessAnimBlueprint: %s anim graph has no output node."), *AssetName);
 		return nullptr;
 	}
 	UAnimGraphNode_Root* RootNode = RootNodes[0];
@@ -131,19 +135,19 @@ UAnimBlueprint* URammsCrowdAnimAssetLibrary::CreateFootPlacementPostProcessAnimB
 	UEdGraphPin*				 ResultPin = RootNode->FindPin(TEXT("Result"), EGPD_Input);
 	if (InputPosePin == nullptr || FootInPin == nullptr || FootOutPin == nullptr || ResultPin == nullptr)
 	{
-		UE_LOG(LogTemp, Error, TEXT("CreateFootPlacementPostProcessAnimBlueprint: unexpected pin layout (input:%d foot-in:%d foot-out:%d result:%d)."),
+		UE_LOG(LogRammsCrowdEditor, Error, TEXT("CreateFootPlacementPostProcessAnimBlueprint: unexpected pin layout (input:%d foot-in:%d foot-out:%d result:%d)."),
 			InputPosePin != nullptr, FootInPin != nullptr, FootOutPin != nullptr, ResultPin != nullptr);
 		return nullptr;
 	}
 	if (!Schema->TryCreateConnection(InputPosePin, FootInPin) || !Schema->TryCreateConnection(FootOutPin, ResultPin))
 	{
-		UE_LOG(LogTemp, Error, TEXT("CreateFootPlacementPostProcessAnimBlueprint: pin connection failed."));
+		UE_LOG(LogRammsCrowdEditor, Error, TEXT("CreateFootPlacementPostProcessAnimBlueprint: pin connection failed."));
 		return nullptr;
 	}
 
 	FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(AnimBP);
 	FKismetEditorUtilities::CompileBlueprint(AnimBP);
 	AnimBP->MarkPackageDirty();
-	UE_LOG(LogTemp, Log, TEXT("CreateFootPlacementPostProcessAnimBlueprint: built %s (skeleton %s)."), *AnimBP->GetPathName(), *Skeleton->GetName());
+	UE_LOG(LogRammsCrowdEditor, Log, TEXT("CreateFootPlacementPostProcessAnimBlueprint: built %s (skeleton %s)."), *AnimBP->GetPathName(), *Skeleton->GetName());
 	return AnimBP;
 }

@@ -9,7 +9,8 @@ parts follow the leader body component's pose, so assigning to every SK_Base
 mesh is safe: only components that actually evaluate animation run the graph.
 
 Prerequisites:
-  1. AnimationWarping plugin enabled (Ramms.uproject).
+  1. AnimationWarping plugin available (RammsCrowd.uplugin declares it as a
+     plugin dependency, so host projects need no extra enablement).
   2. The post-process AnimBP exists (default: /Game/NPCs/ABP_Crowd_FootPlacement_PP,
      Input Pose -> Foot Placement -> Output Pose, skeleton = SK_Base).
 
