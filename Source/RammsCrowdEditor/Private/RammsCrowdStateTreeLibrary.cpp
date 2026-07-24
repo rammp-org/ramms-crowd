@@ -2,6 +2,8 @@
 
 #include "RammsCrowdStateTreeLibrary.h"
 
+#include "RammsCrowdEditorLog.h"
+
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "Logging/TokenizedMessage.h"
 #include "MassStateTreeSchema.h"
@@ -19,12 +21,10 @@
 #include "Tasks/MassZoneGraphStandTask.h"
 #include "UObject/Package.h"
 
-DEFINE_LOG_CATEGORY_STATIC(LogRammsCrowdEditor, Log, All);
-
 UStateTree* URammsCrowdStateTreeLibrary::CreatePedestrianWanderStateTree(const FString& PackagePath, const FString& AssetName)
 {
 	const FString PackageName = PackagePath / AssetName;
-	UPackage* Package = CreatePackage(*PackageName);
+	UPackage*	  Package = CreatePackage(*PackageName);
 	if (Package == nullptr)
 	{
 		UE_LOG(LogRammsCrowdEditor, Error, TEXT("CreatePedestrianWanderStateTree: cannot create package '%s'"), *PackageName);
@@ -34,7 +34,7 @@ UStateTree* URammsCrowdStateTreeLibrary::CreatePedestrianWanderStateTree(const F
 	// LoadObject (not FindObject): after an editor restart the asset can exist on
 	// disk without being in memory — FindObject would shadow it with a second object.
 	UStateTree* StateTree = LoadObject<UStateTree>(nullptr, *(PackageName + TEXT(".") + AssetName), nullptr, LOAD_NoWarn);
-	const bool bCreatedNew = StateTree == nullptr;
+	const bool	bCreatedNew = StateTree == nullptr;
 	if (bCreatedNew)
 	{
 		StateTree = NewObject<UStateTree>(Package, FName(*AssetName), RF_Public | RF_Standalone | RF_Transactional);
@@ -83,8 +83,7 @@ UStateTree* URammsCrowdStateTreeLibrary::CreatePedestrianWanderStateTree(const F
 
 	// Interrupt Wander/Stand the moment the perception processor reports a startle
 	// (its zone-change signal wakes the tree, which evaluates these tick transitions).
-	auto AddStartleInterrupt = [&BackAway](UStateTreeState& State)
-	{
+	auto AddStartleInterrupt = [&BackAway](UStateTreeState& State) {
 		FStateTreeTransition& Interrupt = State.AddTransition(EStateTreeTransitionTrigger::OnTick, EStateTreeTransitionType::GotoState, &BackAway);
 		FStateTreeEditorNode& CondNode = Interrupt.Conditions.AddDefaulted_GetRef();
 		CondNode.ID = FGuid::NewGuid();
@@ -99,7 +98,7 @@ UStateTree* URammsCrowdStateTreeLibrary::CreatePedestrianWanderStateTree(const F
 	AddStartleInterrupt(Stand);
 
 	FStateTreeCompilerLog CompilerLog;
-	const bool bCompiled = UStateTreeEditingSubsystem::CompileStateTree(StateTree, CompilerLog);
+	const bool			  bCompiled = UStateTreeEditingSubsystem::CompileStateTree(StateTree, CompilerLog);
 	for (const TSharedRef<FTokenizedMessage>& Message : CompilerLog.ToTokenizedMessages())
 	{
 		UE_LOG(LogRammsCrowdEditor, Log, TEXT("StateTree compile: %s"), *Message->ToText().ToString());

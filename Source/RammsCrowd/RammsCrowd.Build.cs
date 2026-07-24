@@ -30,6 +30,9 @@ public class RammsCrowd : ModuleRules
 		PrivateDependencyModuleNames.AddRange(
 			new string[]
 			{
+				"AnimGraphRuntime",
+				"AnimationCore",
+				"AnimationWarpingRuntime",
 				"MassCrowd",
 				"MassZoneGraphNavigation",
 				"MassNavMeshNavigation",

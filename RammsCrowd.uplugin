@@ -50,6 +50,10 @@
 		{
 			"Name": "ZoneGraphAnnotations",
 			"Enabled": true
+		},
+		{
+			"Name": "AnimationWarping",
+			"Enabled": true
 		}
 	]
 }
