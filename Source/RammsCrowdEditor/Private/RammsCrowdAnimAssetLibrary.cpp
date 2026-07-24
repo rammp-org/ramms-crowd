@@ -36,7 +36,12 @@ UAnimBlueprint* URammsCrowdAnimAssetLibrary::CreateFootPlacementPostProcessAnimB
 	}
 
 	// Idempotent: reuse an existing asset (its graph is rebuilt below), else create.
-	UAnimBlueprint* AnimBP = LoadObject<UAnimBlueprint>(nullptr, *(PackagePath / AssetName));
+	// Full object path (Package.AssetName), and LoadObject rather than FindObject:
+	// after an editor restart the asset can exist on disk without being in memory,
+	// and a bare package path fails to resolve the object (see the StateTree
+	// utility for the same convention).
+	const FString	PackageName = PackagePath / AssetName;
+	UAnimBlueprint* AnimBP = LoadObject<UAnimBlueprint>(nullptr, *(PackageName + TEXT(".") + AssetName), nullptr, LOAD_NoWarn);
 	if (AnimBP == nullptr)
 	{
 		UAnimBlueprintFactory* Factory = NewObject<UAnimBlueprintFactory>();
@@ -95,7 +100,7 @@ UAnimBlueprint* URammsCrowdAnimAssetLibrary::CreateFootPlacementPostProcessAnimB
 
 	// Foot Placement, configured for the City Sample SK_Base bone naming.
 	FGraphNodeCreator<UAnimGraphNode_RammsFootPlacement> FootCreator(*AnimGraph);
-	UAnimGraphNode_RammsFootPlacement*					FootNode = FootCreator.CreateNode();
+	UAnimGraphNode_RammsFootPlacement*					 FootNode = FootCreator.CreateNode();
 	FootNode->NodePosX = RootNode->NodePosX - 400;
 	FootNode->NodePosY = RootNode->NodePosY;
 	{

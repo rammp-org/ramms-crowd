@@ -21,7 +21,7 @@ FText UAnimGraphNode_RammsFootPlacement::GetTooltipText() const
 
 FLinearColor UAnimGraphNode_RammsFootPlacement::GetNodeTitleColor() const
 {
-	return FLinearColor(FColor(153.f, 40.f, 0.f));
+	return FLinearColor(FColor(153, 40, 0));
 }
 
 FText UAnimGraphNode_RammsFootPlacement::GetNodeTitle(ENodeTitleType::Type TitleType) const
