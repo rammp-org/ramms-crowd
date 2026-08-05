@@ -23,14 +23,14 @@ class UAnimGraphNode_RammsFootPlacement : public UAnimGraphNode_SkeletalControlB
 
 public:
 	// UEdGraphNode interface
-	RAMMSCROWDEDITOR_API virtual FText		  GetNodeTitle(ENodeTitleType::Type TitleType) const override;
-	RAMMSCROWDEDITOR_API virtual FText		  GetTooltipText() const override;
-	RAMMSCROWDEDITOR_API virtual FLinearColor GetNodeTitleColor() const override;
+	RAMMSCROWDUNCOOKED_API virtual FText		  GetNodeTitle(ENodeTitleType::Type TitleType) const override;
+	RAMMSCROWDUNCOOKED_API virtual FText		  GetTooltipText() const override;
+	RAMMSCROWDUNCOOKED_API virtual FLinearColor GetNodeTitleColor() const override;
 	// End of UEdGraphNode interface
 
 protected:
 	// UAnimGraphNode_SkeletalControlBase interface
-	RAMMSCROWDEDITOR_API virtual FText			 GetControllerDescription() const override;
+	RAMMSCROWDUNCOOKED_API virtual FText			 GetControllerDescription() const override;
 	virtual const FAnimNode_SkeletalControlBase* GetNode() const override { return &Node; }
 	// End of UAnimGraphNode_SkeletalControlBase interface
 };

@@ -21,6 +21,11 @@
 			"LoadingPhase": "PostConfigInit"
 		},
 		{
+			"Name": "RammsCrowdUncooked",
+			"Type": "UncookedOnly",
+			"LoadingPhase": "PreDefault"
+		},
+		{
 			"Name": "RammsCrowdEditor",
 			"Type": "Editor",
 			"LoadingPhase": "Default"
