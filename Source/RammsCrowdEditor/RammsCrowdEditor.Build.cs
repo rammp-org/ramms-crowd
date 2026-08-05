@@ -32,6 +32,7 @@ public class RammsCrowdEditor : ModuleRules
 			"MassMovement",
 			"PropertyBindingUtils",
 			"RammsCrowd",
+			"RammsCrowdUncooked",
 			"Slate",
 			"SlateCore",
 			"StateTreeModule",
