@@ -27,6 +27,13 @@ public class RammsCrowd : ModuleRules
 			}
 			);
 
+		// UE 5.8 moved the core Mass types (FMassFragment, FTransformFragment,
+		// FMassEntityHandle, ...) out of MassEntity into the new MassCore module.
+		if (Target.Version.MajorVersion > 5 || (Target.Version.MajorVersion == 5 && Target.Version.MinorVersion >= 8))
+		{
+			PublicDependencyModuleNames.Add("MassCore");
+		}
+
 		PrivateDependencyModuleNames.AddRange(
 			new string[]
 			{
