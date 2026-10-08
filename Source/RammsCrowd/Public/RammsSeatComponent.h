@@ -160,6 +160,29 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Ramms|Seat|Head Tracking", meta = (EditCondition = "bTrackOccupantHead"))
 	FTransform HeadSocketOffset = FTransform(FRotator(0.0f, 90.0f, -90.0f), FVector(6.0f, 8.0f, 0.0f));
 
+	/**
+	 * Take the head's ORIENTATION as well as its position.
+	 *
+	 * Off by default, and that default is about the controls rather than taste.
+	 * Anything that aims this component does so in its PARENT's space --
+	 * URammsRobotCameraComponent::Orbit adds to the spring arm's relative yaw,
+	 * clamps its relative pitch and zeroes its relative roll -- and all of that
+	 * was written for a parent aligned with the vehicle. Parented to a head bone
+	 * whose axes are permuted, "yaw" turns about a sideways axis and "roll = 0"
+	 * levels against the skull instead of the horizon.
+	 *
+	 * With this off the component's rotation is absolute, so its position still
+	 * comes from the bone -- the eyes move with whoever is sitting there -- while
+	 * yaw, pitch and roll stay world-aligned and every existing control keeps
+	 * meaning what it meant.
+	 *
+	 * Turn it on for a view that genuinely follows the occupant's gaze, and
+	 * expect anything that orbits it to need rewriting in head space.
+	 * HeadSocketOffset's rotation is only used when this is on.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Ramms|Seat|Head Tracking", meta = (EditCondition = "bTrackOccupantHead"))
+	bool bTrackHeadRotation = false;
+
 	/** Put the tracked component on the head now, or return it if it cannot. */
 	UFUNCTION(BlueprintCallable, Category = "Ramms|Seat|Head Tracking")
 	bool AttachTrackedComponentToHead();

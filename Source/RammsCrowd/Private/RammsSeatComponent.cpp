@@ -245,11 +245,33 @@ bool URammsSeatComponent::AttachTrackedComponentToHead()
 
 	// Re-attaching to the same bone every enforce tick would be wasted work, but
 	// re-attaching after an assembly mesh swap is the entire point, so compare.
-	if (TrackedComponent->GetAttachParent() != Mesh || TrackedComponent->GetAttachSocketName() != Bone)
+	const bool bFreshAttach = TrackedComponent->GetAttachParent() != Mesh || TrackedComponent->GetAttachSocketName() != Bone;
+	if (bFreshAttach)
 	{
 		TrackedComponent->AttachToComponent(Mesh, FAttachmentTransformRules::SnapToTargetNotIncludingScale, Bone);
 	}
-	TrackedComponent->SetRelativeTransform(HeadSocketOffset);
+
+	// The location is bone-relative either way: that is what puts the eyes where
+	// this occupant's eyes are, and it stays correct whether or not the rotation
+	// follows the head.
+	TrackedComponent->SetUsingAbsoluteRotation(!bTrackHeadRotation);
+	TrackedComponent->SetRelativeLocation(HeadSocketOffset.GetTranslation());
+
+	if (bTrackHeadRotation)
+	{
+		TrackedComponent->SetRelativeRotation(HeadSocketOffset.GetRotation());
+	}
+	else if (bFreshAttach)
+	{
+		// World-aligned with the actor, and only on a FRESH attach. Re-asserting
+		// it every enforce tick would throw away whatever the player had aimed
+		// the camera at in the quarter second since the last one.
+		if (const AActor* OwningActor = GetOwner())
+		{
+			TrackedComponent->SetWorldRotation(FRotator(0.0f, OwningActor->GetActorRotation().Yaw, 0.0f));
+		}
+	}
+
 	ResolvedHeadBone = Bone;
 	return true;
 }
@@ -263,6 +285,9 @@ void URammsSeatComponent::DetachTrackedComponentFromHead()
 	}
 	// Back to where it was authored. Without this the camera would be left
 	// attached to a destroyed occupant's mesh, or floating at the last head pose.
+	// Absolute rotation is part of what was changed, so it is part of what gets
+	// put back.
+	TrackedComponent->SetUsingAbsoluteRotation(false);
 	if (TrackedComponentOriginalParent != nullptr)
 	{
 		TrackedComponent->AttachToComponent(TrackedComponentOriginalParent, FAttachmentTransformRules::KeepRelativeTransform);
