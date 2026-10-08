@@ -25,17 +25,17 @@ URammsSeatComponent::URammsSeatComponent()
 	// as "the pose isn't applying". Same signs work on both body sides (mirrored
 	// bone frames).
 	PoseBoneOffsets = {
-		{ TEXT("thigh_l"),    FRotator(0.0f, -85.0f, 0.0f) },  // hip flexion: thigh horizontal
-		{ TEXT("thigh_r"),    FRotator(0.0f, -85.0f, 0.0f) },
-		{ TEXT("calf_l"),     FRotator(0.0f, 85.0f, 0.0f) },   // knee flexion: shin vertical
-		{ TEXT("calf_r"),     FRotator(0.0f, 85.0f, 0.0f) },
-		{ TEXT("foot_l"),     FRotator(0.0f, -10.0f, 0.0f) },  // ankle: keep feet near flat
-		{ TEXT("foot_r"),     FRotator(0.0f, -10.0f, 0.0f) },
-		{ TEXT("spine_01"),   FRotator(0.0f, -8.0f, 0.0f) },   // slight recline into backrest
-		{ TEXT("spine_02"),   FRotator(0.0f, 5.0f, 0.0f) },
+		{ TEXT("thigh_l"), FRotator(0.0f, -85.0f, 0.0f) }, // hip flexion: thigh horizontal
+		{ TEXT("thigh_r"), FRotator(0.0f, -85.0f, 0.0f) },
+		{ TEXT("calf_l"), FRotator(0.0f, 85.0f, 0.0f) }, // knee flexion: shin vertical
+		{ TEXT("calf_r"), FRotator(0.0f, 85.0f, 0.0f) },
+		{ TEXT("foot_l"), FRotator(0.0f, -10.0f, 0.0f) }, // ankle: keep feet near flat
+		{ TEXT("foot_r"), FRotator(0.0f, -10.0f, 0.0f) },
+		{ TEXT("spine_01"), FRotator(0.0f, -8.0f, 0.0f) }, // slight recline into backrest
+		{ TEXT("spine_02"), FRotator(0.0f, 5.0f, 0.0f) },
 		{ TEXT("upperarm_l"), FRotator(-30.0f, 10.0f, 0.0f) }, // arms in toward body, slightly forward
 		{ TEXT("upperarm_r"), FRotator(-30.0f, 10.0f, 0.0f) },
-		{ TEXT("lowerarm_l"), FRotator(0.0f, 15.0f, 0.0f) },   // relaxed elbow bend, hands near lap
+		{ TEXT("lowerarm_l"), FRotator(0.0f, 15.0f, 0.0f) }, // relaxed elbow bend, hands near lap
 		{ TEXT("lowerarm_r"), FRotator(0.0f, 15.0f, 0.0f) },
 	};
 }
@@ -107,7 +107,7 @@ void URammsSeatComponent::SpawnOccupant()
 		}
 
 		FActorSpawnParameters DeferredParams = Params; // transient + AlwaysSpawn
-		DeferredParams.bDeferConstruction = true;     // so RandomOptions lands before construction
+		DeferredParams.bDeferConstruction = true;	   // so RandomOptions lands before construction
 		DeferredParams.Owner = GetOwner();
 		AActor* Actor = World->SpawnActor(ActorClass, &SeatTransform, DeferredParams);
 		if (Actor == nullptr)
@@ -147,6 +147,7 @@ void URammsSeatComponent::SpawnOccupant()
 		ApplyOccupantOffset();
 		ConfigureOccupantActor(Occupant);
 		ApplyPose();
+		AttachTrackedComponentToHead();
 
 		// Outlast the occupant's own deferred setup (async part loads, appearance
 		// randomization mesh swaps) which would otherwise reset the pose to ref/A-pose.
@@ -158,10 +159,128 @@ void URammsSeatComponent::SpawnOccupant()
 	}
 }
 
+FName URammsSeatComponent::ResolveHeadBone(const USkeletalMeshComponent* Mesh) const
+{
+	if (Mesh == nullptr)
+	{
+		return NAME_None;
+	}
+	// The crowd does not guarantee one skeleton, so the configured name is a
+	// preference rather than a promise.
+	if (HeadBoneName != NAME_None && Mesh->GetBoneIndex(HeadBoneName) != INDEX_NONE)
+	{
+		return HeadBoneName;
+	}
+	for (const FName& Fallback : HeadBoneFallbacks)
+	{
+		if (Fallback != NAME_None && Mesh->GetBoneIndex(Fallback) != INDEX_NONE)
+		{
+			return Fallback;
+		}
+	}
+	return NAME_None;
+}
+
+bool URammsSeatComponent::AttachTrackedComponentToHead()
+{
+	if (!bTrackOccupantHead || TrackedComponentName == NAME_None)
+	{
+		return false;
+	}
+
+	AActor* Owner = GetOwner();
+	if (Owner == nullptr)
+	{
+		return false;
+	}
+
+	// Found on the OWNER, and left owned by it. Camera discovery is by owner,
+	// not by attachment, so re-parenting keeps the camera in the sim UI's list.
+	if (TrackedComponent == nullptr)
+	{
+		TInlineComponentArray<USceneComponent*> Components(Owner);
+		for (USceneComponent* Component : Components)
+		{
+			if (Component != nullptr && Component->GetFName() == TrackedComponentName)
+			{
+				TrackedComponent = Component;
+				break;
+			}
+		}
+		if (TrackedComponent == nullptr)
+		{
+			UE_LOG(LogTemp, Warning,
+				TEXT("[RammsSeatComponent] %s has no scene component named '%s' to put on the occupant's head."),
+				*Owner->GetName(), *TrackedComponentName.ToString());
+			return false;
+		}
+	}
+
+	USkeletalMeshComponent* Mesh = GetOccupantLeaderMesh();
+	if (Mesh == nullptr)
+	{
+		// Normal during the occupant's deferred assembly; the enforce timer
+		// retries.
+		return false;
+	}
+
+	const FName Bone = ResolveHeadBone(Mesh);
+	if (Bone == NAME_None)
+	{
+		UE_LOG(LogTemp, Warning,
+			TEXT("[RammsSeatComponent] Occupant mesh %s has none of the configured head bones ('%s' or %d fallback(s)); ")
+				TEXT("leaving %s where it was authored."),
+			*Mesh->GetName(), *HeadBoneName.ToString(), HeadBoneFallbacks.Num(), *TrackedComponentName.ToString());
+		return false;
+	}
+
+	// Remember where it came from, once, so detaching restores the authored pose
+	// rather than leaving it wherever the occupant happened to be.
+	if (!bTrackedComponentWasAttached)
+	{
+		TrackedComponentOriginalParent = TrackedComponent->GetAttachParent();
+		TrackedComponentOriginalRelative = TrackedComponent->GetRelativeTransform();
+		bTrackedComponentWasAttached = true;
+	}
+
+	// Re-attaching to the same bone every enforce tick would be wasted work, but
+	// re-attaching after an assembly mesh swap is the entire point, so compare.
+	if (TrackedComponent->GetAttachParent() != Mesh || TrackedComponent->GetAttachSocketName() != Bone)
+	{
+		TrackedComponent->AttachToComponent(Mesh, FAttachmentTransformRules::SnapToTargetNotIncludingScale, Bone);
+	}
+	TrackedComponent->SetRelativeTransform(HeadSocketOffset);
+	ResolvedHeadBone = Bone;
+	return true;
+}
+
+void URammsSeatComponent::DetachTrackedComponentFromHead()
+{
+	ResolvedHeadBone = NAME_None;
+	if (TrackedComponent == nullptr || !bTrackedComponentWasAttached)
+	{
+		return;
+	}
+	// Back to where it was authored. Without this the camera would be left
+	// attached to a destroyed occupant's mesh, or floating at the last head pose.
+	if (TrackedComponentOriginalParent != nullptr)
+	{
+		TrackedComponent->AttachToComponent(TrackedComponentOriginalParent, FAttachmentTransformRules::KeepRelativeTransform);
+	}
+	else
+	{
+		TrackedComponent->DetachFromComponent(FDetachmentTransformRules::KeepWorldTransform);
+	}
+	TrackedComponent->SetRelativeTransform(TrackedComponentOriginalRelative);
+	bTrackedComponentWasAttached = false;
+}
+
 void URammsSeatComponent::EnforcePoseTick()
 {
 	ApplyPose();
 	ConfigureOccupantActor(Occupant); // late-added parts must not gain collision either
+	// Same reason as the pose: an assembly mesh swap drops the attachment.
+	AttachTrackedComponentToHead();
 	if (--PoseEnforceTicksRemaining <= 0)
 	{
 		if (UWorld* World = GetWorld())
@@ -177,6 +296,9 @@ void URammsSeatComponent::ClearOccupant()
 	{
 		World->GetTimerManager().ClearTimer(PoseEnforceTimer);
 	}
+	// Before the mesh goes: otherwise the tracked component is left attached to a
+	// destroyed actor's component.
+	DetachTrackedComponentFromHead();
 	if (Occupant != nullptr)
 	{
 		Occupant->Destroy();

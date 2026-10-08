@@ -6,6 +6,7 @@
 #include "Components/SceneComponent.h"
 #include "RammsSeatComponent.generated.h"
 
+class USceneComponent;
 class USkeletalMesh;
 class USkeletalMeshComponent;
 #if WITH_EDITOR
@@ -91,6 +92,79 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Ramms|Seat")
 	AActor* GetOccupant() const { return Occupant; }
 
+	// ── Head tracking ───────────────────────────────────────────────────────
+	//
+	// A first-person camera authored on the owning actor sits where the author
+	// guessed a head would be. Occupants vary -- that is the point of the City
+	// Sample crowd -- so for most of them it is in the wrong place. This moves a
+	// named component of the OWNER onto the occupant's head bone instead.
+	//
+	// Deliberately does NOT move the camera onto the occupant actor. Camera
+	// discovery (URammsRobotCameraComponent) enumerates
+	// Owner->GetComponents<UCameraComponent>(), which is about OWNERSHIP, not
+	// attachment: re-parenting a pawn-owned camera to another actor's bone keeps
+	// it discoverable, switchable and nameable exactly as before, while giving
+	// the camera away to the occupant would make it vanish from the sim UI.
+
+	/** Attach TrackedComponentName to the occupant's head bone. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Ramms|Seat|Head Tracking")
+	bool bTrackOccupantHead = false;
+
+	/**
+	 * Component on the OWNING actor to put on the head -- typically the
+	 * first-person camera. Any USceneComponent; it stays owned by the owner, so
+	 * anything that finds it by owner still finds it.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Ramms|Seat|Head Tracking", meta = (EditCondition = "bTrackOccupantHead"))
+	FName TrackedComponentName;
+
+	/**
+	 * Bone to attach to. Falls back through HeadBoneFallbacks when the occupant's
+	 * skeleton does not have this one, because the crowd does not guarantee one
+	 * skeleton.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Ramms|Seat|Head Tracking", meta = (EditCondition = "bTrackOccupantHead"))
+	FName HeadBoneName = FName("head");
+
+	/** Tried in order when HeadBoneName is absent. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Ramms|Seat|Head Tracking", meta = (EditCondition = "bTrackOccupantHead"))
+	TArray<FName> HeadBoneFallbacks = { FName("Head"), FName("head_01"), FName("neck_01"), FName("Neck") };
+
+	/**
+	 * Where the eyes are relative to the head BONE.
+	 *
+	 * The bone sits inside the skull, not at the eyes, and its axes are not a
+	 * camera's: measured on the City Sample crowd skeleton, bone +Y points the
+	 * way the face does and bone +X points up through the skull. The default
+	 * rotation is the permutation that turns those into a camera's forward and
+	 * up -- derived by sweeping orientations against the actor's own forward
+	 * vector, not guessed -- and the default location is 8 cm forward and 6 cm up
+	 * from the bone, which lands at the eyes.
+	 *
+	 * One offset serves every occupant sharing a skeleton AND this seat's pose --
+	 * not a skeleton alone. PoseBoneOffsets rotates the head bone, so the same
+	 * skeleton posed differently needs a different offset; measured on an unposed
+	 * occupant the shipped default comes out rolled onto its side. Tune it once
+	 * per seat, with occupants in the pose that seat applies.
+	 *
+	 * Note the camera therefore looks where the HEAD looks, idle head turns
+	 * included, rather than always straight ahead.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Ramms|Seat|Head Tracking", meta = (EditCondition = "bTrackOccupantHead"))
+	FTransform HeadSocketOffset = FTransform(FRotator(-90.0f, 0.0f, 90.0f), FVector(6.0f, 8.0f, 0.0f));
+
+	/** Put the tracked component on the head now, or return it if it cannot. */
+	UFUNCTION(BlueprintCallable, Category = "Ramms|Seat|Head Tracking")
+	bool AttachTrackedComponentToHead();
+
+	/** Put it back where it was authored. */
+	UFUNCTION(BlueprintCallable, Category = "Ramms|Seat|Head Tracking")
+	void DetachTrackedComponentFromHead();
+
+	/** The bone actually used, or NAME_None when not attached. */
+	UFUNCTION(BlueprintPure, Category = "Ramms|Seat|Head Tracking")
+	FName GetResolvedHeadBone() const { return ResolvedHeadBone; }
+
 	virtual void BeginPlay() override;
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 
@@ -100,10 +174,10 @@ public:
 #endif
 
 private:
-	void ConfigureOccupantActor(AActor* Actor);
-	void ApplyOccupantOffset();
+	void					ConfigureOccupantActor(AActor* Actor);
+	void					ApplyOccupantOffset();
 	USkeletalMeshComponent* GetOccupantLeaderMesh() const;
-	void EnforcePoseTick();
+	void					EnforcePoseTick();
 
 	UPROPERTY(Transient)
 	TObjectPtr<AActor> Occupant;
@@ -114,5 +188,22 @@ private:
 	 * seconds after spawn the pose is re-asserted periodically.
 	 */
 	FTimerHandle PoseEnforceTimer;
-	int32 PoseEnforceTicksRemaining = 0;
+	int32		 PoseEnforceTicksRemaining = 0;
+
+	/** The owner's component named by TrackedComponentName, found once. */
+	UPROPERTY(Transient)
+	TObjectPtr<USceneComponent> TrackedComponent;
+
+	/** Where the tracked component was before it went on the head, so detaching
+	 *  restores it rather than leaving it wherever the occupant died. */
+	UPROPERTY(Transient)
+	TObjectPtr<USceneComponent> TrackedComponentOriginalParent;
+
+	FTransform TrackedComponentOriginalRelative = FTransform::Identity;
+	bool	   bTrackedComponentWasAttached = false;
+
+	FName ResolvedHeadBone = NAME_None;
+
+	/** First of HeadBoneName / HeadBoneFallbacks the mesh actually has. */
+	FName ResolveHeadBone(const USkeletalMeshComponent* Mesh) const;
 };
