@@ -167,14 +167,20 @@ public:
 	 * Anything that aims this component does so in its PARENT's space --
 	 * URammsRobotCameraComponent::Orbit adds to the spring arm's relative yaw,
 	 * clamps its relative pitch and zeroes its relative roll -- and all of that
-	 * was written for a parent aligned with the vehicle. Parented to a head bone
-	 * whose axes are permuted, "yaw" turns about a sideways axis and "roll = 0"
-	 * levels against the skull instead of the horizon.
+	 * was written for a parent aligned with the vehicle, and reparenting a rig
+	 * onto a head bone whose axes are permuted turns "yaw" about a sideways axis
+	 * and levels "roll = 0" against the skull.
 	 *
-	 * With this off the component's rotation is absolute, so its position still
-	 * comes from the bone -- the eyes move with whoever is sitting there -- while
-	 * yaw, pitch and roll stay world-aligned and every existing control keeps
-	 * meaning what it meant.
+	 * With this off, rotation is simply never written. The component keeps its
+	 * authored parent and parent-relative rotation, so it still inherits the
+	 * vehicle's heading and every control keeps meaning what it meant, while its
+	 * position comes from the bone -- the eyes move with whoever is sitting
+	 * there.
+	 *
+	 * Not the same as making the rotation absolute, which was the first attempt:
+	 * that also stopped the rig inheriting the VEHICLE's rotation, so turning
+	 * the chair moved the camera with the head and left the view facing its old
+	 * heading.
 	 *
 	 * Turn it on for a view that genuinely follows the occupant's gaze, and
 	 * expect anything that orbits it to need rewriting in head space.
@@ -183,11 +189,13 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Ramms|Seat|Head Tracking", meta = (EditCondition = "bTrackOccupantHead"))
 	bool bTrackHeadRotation = false;
 
-	/** Put the tracked component on the head now, or return it if it cannot. */
+	/** Start driving the tracked component from the occupant's head, or report
+	 *  why it cannot. Despite the name it attaches nothing -- see the class
+	 *  comment -- and is kept for callers that already use it. */
 	UFUNCTION(BlueprintCallable, Category = "Ramms|Seat|Head Tracking")
 	bool AttachTrackedComponentToHead();
 
-	/** Put it back where it was authored. */
+	/** Stop, and put it back where it was authored. */
 	UFUNCTION(BlueprintCallable, Category = "Ramms|Seat|Head Tracking")
 	void DetachTrackedComponentFromHead();
 
