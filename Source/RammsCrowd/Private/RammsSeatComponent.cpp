@@ -11,7 +11,12 @@
 
 URammsSeatComponent::URammsSeatComponent()
 {
-	PrimaryComponentTick.bCanEverTick = false;
+	// Off until head tracking actually has something to drive; see
+	// AttachTrackedComponentToHead. PostUpdateWork so the occupant's pose for
+	// this frame is final before the head is sampled.
+	PrimaryComponentTick.bCanEverTick = true;
+	PrimaryComponentTick.bStartWithTickEnabled = false;
+	PrimaryComponentTick.TickGroup = TG_PostUpdateWork;
 
 	// Default occupant: the City Sample crowd character (soft path — the pack is
 	// user-installed and may be absent; see RammsCrowd doc/SETUP.md §0).
@@ -25,17 +30,17 @@ URammsSeatComponent::URammsSeatComponent()
 	// as "the pose isn't applying". Same signs work on both body sides (mirrored
 	// bone frames).
 	PoseBoneOffsets = {
-		{ TEXT("thigh_l"),    FRotator(0.0f, -85.0f, 0.0f) },  // hip flexion: thigh horizontal
-		{ TEXT("thigh_r"),    FRotator(0.0f, -85.0f, 0.0f) },
-		{ TEXT("calf_l"),     FRotator(0.0f, 85.0f, 0.0f) },   // knee flexion: shin vertical
-		{ TEXT("calf_r"),     FRotator(0.0f, 85.0f, 0.0f) },
-		{ TEXT("foot_l"),     FRotator(0.0f, -10.0f, 0.0f) },  // ankle: keep feet near flat
-		{ TEXT("foot_r"),     FRotator(0.0f, -10.0f, 0.0f) },
-		{ TEXT("spine_01"),   FRotator(0.0f, -8.0f, 0.0f) },   // slight recline into backrest
-		{ TEXT("spine_02"),   FRotator(0.0f, 5.0f, 0.0f) },
+		{ TEXT("thigh_l"), FRotator(0.0f, -85.0f, 0.0f) }, // hip flexion: thigh horizontal
+		{ TEXT("thigh_r"), FRotator(0.0f, -85.0f, 0.0f) },
+		{ TEXT("calf_l"), FRotator(0.0f, 85.0f, 0.0f) }, // knee flexion: shin vertical
+		{ TEXT("calf_r"), FRotator(0.0f, 85.0f, 0.0f) },
+		{ TEXT("foot_l"), FRotator(0.0f, -10.0f, 0.0f) }, // ankle: keep feet near flat
+		{ TEXT("foot_r"), FRotator(0.0f, -10.0f, 0.0f) },
+		{ TEXT("spine_01"), FRotator(0.0f, -8.0f, 0.0f) }, // slight recline into backrest
+		{ TEXT("spine_02"), FRotator(0.0f, 5.0f, 0.0f) },
 		{ TEXT("upperarm_l"), FRotator(-30.0f, 10.0f, 0.0f) }, // arms in toward body, slightly forward
 		{ TEXT("upperarm_r"), FRotator(-30.0f, 10.0f, 0.0f) },
-		{ TEXT("lowerarm_l"), FRotator(0.0f, 15.0f, 0.0f) },   // relaxed elbow bend, hands near lap
+		{ TEXT("lowerarm_l"), FRotator(0.0f, 15.0f, 0.0f) }, // relaxed elbow bend, hands near lap
 		{ TEXT("lowerarm_r"), FRotator(0.0f, 15.0f, 0.0f) },
 	};
 }
@@ -107,7 +112,7 @@ void URammsSeatComponent::SpawnOccupant()
 		}
 
 		FActorSpawnParameters DeferredParams = Params; // transient + AlwaysSpawn
-		DeferredParams.bDeferConstruction = true;     // so RandomOptions lands before construction
+		DeferredParams.bDeferConstruction = true;	   // so RandomOptions lands before construction
 		DeferredParams.Owner = GetOwner();
 		AActor* Actor = World->SpawnActor(ActorClass, &SeatTransform, DeferredParams);
 		if (Actor == nullptr)
@@ -147,6 +152,7 @@ void URammsSeatComponent::SpawnOccupant()
 		ApplyOccupantOffset();
 		ConfigureOccupantActor(Occupant);
 		ApplyPose();
+		AttachTrackedComponentToHead();
 
 		// Outlast the occupant's own deferred setup (async part loads, appearance
 		// randomization mesh swaps) which would otherwise reset the pose to ref/A-pose.
@@ -158,10 +164,177 @@ void URammsSeatComponent::SpawnOccupant()
 	}
 }
 
+FName URammsSeatComponent::ResolveHeadBone(const USkeletalMeshComponent* Mesh) const
+{
+	if (Mesh == nullptr)
+	{
+		return NAME_None;
+	}
+	// The crowd does not guarantee one skeleton, so the configured name is a
+	// preference rather than a promise.
+	if (HeadBoneName != NAME_None && Mesh->GetBoneIndex(HeadBoneName) != INDEX_NONE)
+	{
+		return HeadBoneName;
+	}
+	for (const FName& Fallback : HeadBoneFallbacks)
+	{
+		if (Fallback != NAME_None && Mesh->GetBoneIndex(Fallback) != INDEX_NONE)
+		{
+			return Fallback;
+		}
+	}
+	return NAME_None;
+}
+
+USceneComponent* URammsSeatComponent::ResolveTrackedComponent()
+{
+	AActor* Owner = GetOwner();
+	if (!bTrackOccupantHead || TrackedComponentName == NAME_None || Owner == nullptr)
+	{
+		return nullptr;
+	}
+
+	// Re-resolve when the NAME changes, not just when the pointer is null. The
+	// property is BlueprintReadWrite, so a cached pointer meant a later change
+	// kept driving the old component while reporting the new name.
+	if (TrackedComponent != nullptr && ResolvedComponentName == TrackedComponentName)
+	{
+		return TrackedComponent;
+	}
+
+	StopDrivingTrackedComponent();
+
+	// Found on the OWNER, and left owned AND parented where it was authored.
+	// Only its world location is driven. Camera discovery is by owner, so this
+	// was never in question -- but leaving the parent alone is what keeps the
+	// vehicle's own rotation, the spring arm's inherit flags and every control
+	// that aims this rig working exactly as before.
+	TInlineComponentArray<USceneComponent*> Components(Owner);
+	for (USceneComponent* Component : Components)
+	{
+		if (Component != nullptr && Component->GetFName() == TrackedComponentName)
+		{
+			TrackedComponent = Component;
+			ResolvedComponentName = TrackedComponentName;
+			TrackedComponentOriginalRelative = Component->GetRelativeTransform();
+			bDrivingTrackedComponent = false;
+			return TrackedComponent;
+		}
+	}
+
+	UE_LOG(LogRammsCrowd, Warning,
+		TEXT("[%s] No scene component named '%s' on %s to put on the occupant's head."),
+		*GetPathName(), *TrackedComponentName.ToString(), *Owner->GetName());
+	return nullptr;
+}
+
+bool URammsSeatComponent::AttachTrackedComponentToHead()
+{
+	USceneComponent* Target = ResolveTrackedComponent();
+	if (Target == nullptr)
+	{
+		return false;
+	}
+
+	USkeletalMeshComponent* Mesh = GetOccupantLeaderMesh();
+	if (Mesh == nullptr)
+	{
+		// Normal during the occupant's deferred assembly; the enforce timer
+		// retries and the tick below simply does nothing until then.
+		return false;
+	}
+
+	const FName Bone = ResolveHeadBone(Mesh);
+	if (Bone == NAME_None)
+	{
+		UE_LOG(LogRammsCrowd, Warning,
+			TEXT("[%s] Occupant mesh %s has none of the configured head bones ('%s' or %d fallback(s)); ")
+				TEXT("leaving %s where it was authored."),
+			*GetPathName(), *Mesh->GetName(), *HeadBoneName.ToString(), HeadBoneFallbacks.Num(),
+			*TrackedComponentName.ToString());
+		return false;
+	}
+
+	ResolvedHeadBone = Bone;
+	bDrivingTrackedComponent = true;
+
+	// Ticking, rather than attaching to the bone. Attachment would hand the
+	// component the bone's ORIENTATION as well as its position, and there is no
+	// configuration of it that gives what a seated first-person camera needs:
+	// attach and follow the head, and anything aiming the rig works in head
+	// space instead of world space; attach with absolute rotation, and the view
+	// stops turning when the VEHICLE does. Driving only the world location
+	// leaves rotation entirely alone -- parent, inherit flags, orbit, clamps --
+	// so the view turns with the chair and the mouse still means what it meant.
+	//
+	// TG_PostUpdateWork so the skeletal mesh's pose for this frame is final:
+	// sampling the bone earlier would lag it by a frame.
+	SetComponentTickEnabled(true);
+	UpdateTrackedComponentFromHead();
+	return true;
+}
+
+void URammsSeatComponent::UpdateTrackedComponentFromHead()
+{
+	if (!bDrivingTrackedComponent || TrackedComponent == nullptr)
+	{
+		return;
+	}
+	USkeletalMeshComponent* Mesh = GetOccupantLeaderMesh();
+	if (Mesh == nullptr || ResolvedHeadBone == NAME_None)
+	{
+		return;
+	}
+
+	// Composed as transforms rather than by multiplying quaternions by hand:
+	// `Offset * BoneWorld` is "offset expressed in bone space, taken to world",
+	// and getting that order backwards is a 90 degree error that looks like a
+	// bad offset rather than like bad arithmetic.
+	const FTransform BoneWorld = Mesh->GetSocketTransform(ResolvedHeadBone, RTS_World);
+	const FTransform Desired = HeadSocketOffset * BoneWorld;
+
+	TrackedComponent->SetWorldLocation(Desired.GetTranslation());
+
+	// Only when asked. The default leaves rotation to whatever owns it, which is
+	// the vehicle and the player's controls.
+	if (bTrackHeadRotation)
+	{
+		TrackedComponent->SetWorldRotation(Desired.GetRotation());
+	}
+}
+
+void URammsSeatComponent::StopDrivingTrackedComponent()
+{
+	ResolvedHeadBone = NAME_None;
+	SetComponentTickEnabled(false);
+	if (TrackedComponent == nullptr || !bDrivingTrackedComponent)
+	{
+		bDrivingTrackedComponent = false;
+		return;
+	}
+	// Back where it was authored, rather than left at the last head pose or
+	// hanging over a destroyed occupant.
+	TrackedComponent->SetRelativeTransform(TrackedComponentOriginalRelative);
+	bDrivingTrackedComponent = false;
+}
+
+void URammsSeatComponent::DetachTrackedComponentFromHead()
+{
+	StopDrivingTrackedComponent();
+}
+
+void URammsSeatComponent::TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction)
+{
+	Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
+	UpdateTrackedComponentFromHead();
+}
+
 void URammsSeatComponent::EnforcePoseTick()
 {
 	ApplyPose();
 	ConfigureOccupantActor(Occupant); // late-added parts must not gain collision either
+	// Same reason as the pose: an assembly mesh swap drops the attachment.
+	AttachTrackedComponentToHead();
 	if (--PoseEnforceTicksRemaining <= 0)
 	{
 		if (UWorld* World = GetWorld())
@@ -177,6 +350,9 @@ void URammsSeatComponent::ClearOccupant()
 	{
 		World->GetTimerManager().ClearTimer(PoseEnforceTimer);
 	}
+	// Before the mesh goes: otherwise the tracked component is left attached to a
+	// destroyed actor's component.
+	DetachTrackedComponentFromHead();
 	if (Occupant != nullptr)
 	{
 		Occupant->Destroy();
