@@ -99,14 +99,14 @@ public:
 	// Sample crowd -- so for most of them it is in the wrong place. This moves a
 	// named component of the OWNER onto the occupant's head bone instead.
 	//
-	// Deliberately does NOT move the camera onto the occupant actor. Camera
-	// discovery (URammsRobotCameraComponent) enumerates
-	// Owner->GetComponents<UCameraComponent>(), which is about OWNERSHIP, not
-	// attachment: re-parenting a pawn-owned camera to another actor's bone keeps
-	// it discoverable, switchable and nameable exactly as before, while giving
-	// the camera away to the occupant would make it vanish from the sim UI.
+	// Nothing is re-parented. The component stays owned by, and attached under,
+	// whatever it was authored on; only its world LOCATION is driven each frame.
+	// That keeps camera discovery working -- URammsRobotCameraComponent
+	// enumerates Owner->GetComponents<UCameraComponent>(), which is about
+	// ownership -- and, more importantly, leaves its ROTATION the vehicle's
+	// business, which is what anything aiming the rig assumes.
 
-	/** Attach TrackedComponentName to the occupant's head bone. */
+	/** Drive TrackedComponentName from the occupant's head bone. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Ramms|Seat|Head Tracking")
 	bool bTrackOccupantHead = false;
 
@@ -191,6 +191,8 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Ramms|Seat|Head Tracking")
 	void DetachTrackedComponentFromHead();
 
+	virtual void TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction) override;
+
 	/** The bone actually used, or NAME_None when not attached. */
 	UFUNCTION(BlueprintPure, Category = "Ramms|Seat|Head Tracking")
 	FName GetResolvedHeadBone() const { return ResolvedHeadBone; }
@@ -224,15 +226,27 @@ private:
 	UPROPERTY(Transient)
 	TObjectPtr<USceneComponent> TrackedComponent;
 
-	/** Where the tracked component was before it went on the head, so detaching
-	 *  restores it rather than leaving it wherever the occupant died. */
-	UPROPERTY(Transient)
-	TObjectPtr<USceneComponent> TrackedComponentOriginalParent;
-
+	/** Where the tracked component sat before it was driven, so stopping restores
+	 *  it rather than leaving it at the last head pose. */
 	FTransform TrackedComponentOriginalRelative = FTransform::Identity;
-	bool	   bTrackedComponentWasAttached = false;
+
+	/** The name TrackedComponent was resolved from, so a later change to
+	 *  TrackedComponentName re-resolves instead of silently driving the old one. */
+	FName ResolvedComponentName = NAME_None;
+
+	bool bDrivingTrackedComponent = false;
 
 	FName ResolvedHeadBone = NAME_None;
+
+	/** The owner's component named by TrackedComponentName, re-resolved when that
+	 *  name changes. Null, and logged, when there is no such component. */
+	USceneComponent* ResolveTrackedComponent();
+
+	/** Put the tracked component at the head for this frame. */
+	void UpdateTrackedComponentFromHead();
+
+	/** Stop driving it and restore its authored transform. */
+	void StopDrivingTrackedComponent();
 
 	/** First of HeadBoneName / HeadBoneFallbacks the mesh actually has. */
 	FName ResolveHeadBone(const USkeletalMeshComponent* Mesh) const;
