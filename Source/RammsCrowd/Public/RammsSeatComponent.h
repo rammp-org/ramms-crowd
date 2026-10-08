@@ -137,9 +137,16 @@ public:
 	 * camera's: measured on the City Sample crowd skeleton, bone +Y points the
 	 * way the face does and bone +X points up through the skull. The default
 	 * rotation is the permutation that turns those into a camera's forward and
-	 * up -- derived by sweeping orientations against the actor's own forward
-	 * vector, not guessed -- and the default location is 8 cm forward and 6 cm up
-	 * from the bone, which lands at the eyes.
+	 * up -- pitch 0, yaw 90, roll -90, derived by sweeping orientations against
+	 * the actor's own forward vector -- and the default location is 8 cm forward
+	 * and 6 cm up from the bone, which lands at the eyes.
+	 *
+	 * The first sweep got this wrong in a way worth recording: it built
+	 * candidates with unreal.Rotator(pitch, yaw, roll) from Python, and that
+	 * constructor actually takes (roll, pitch, yaw). Every candidate was
+	 * therefore a different rotation than its label, and the "winner" shipped
+	 * here produced a camera rolled 77 degrees. Build rotators by named field
+	 * when it matters.
 	 *
 	 * One offset serves every occupant sharing a skeleton AND this seat's pose --
 	 * not a skeleton alone. PoseBoneOffsets rotates the head bone, so the same
@@ -151,7 +158,7 @@ public:
 	 * included, rather than always straight ahead.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Ramms|Seat|Head Tracking", meta = (EditCondition = "bTrackOccupantHead"))
-	FTransform HeadSocketOffset = FTransform(FRotator(-90.0f, 0.0f, 90.0f), FVector(6.0f, 8.0f, 0.0f));
+	FTransform HeadSocketOffset = FTransform(FRotator(0.0f, 90.0f, -90.0f), FVector(6.0f, 8.0f, 0.0f));
 
 	/** Put the tracked component on the head now, or return it if it cannot. */
 	UFUNCTION(BlueprintCallable, Category = "Ramms|Seat|Head Tracking")
