@@ -8,7 +8,38 @@
 #include "MassExecutionContext.h"
 #include "MassRepresentationFragments.h"
 #include "MassRepresentationTypes.h"
+#include "Components/PrimitiveComponent.h"
 #include "RammsCrowdAgentTrait.h"
+
+namespace
+{
+	const FName QueryOnlyTag(TEXT("RammsCrowdQueryOnly"));
+
+	/** Downgrades physical collision on a representation actor to queries only (once per actor). */
+	void MakeQueryOnly(AActor& Actor)
+	{
+		Actor.Tags.AddUnique(QueryOnlyTag);
+		TInlineComponentArray<UPrimitiveComponent*> Primitives(&Actor);
+		for (UPrimitiveComponent* Primitive : Primitives)
+		{
+			switch (Primitive->GetCollisionEnabled())
+			{
+			case ECollisionEnabled::QueryAndPhysics:
+				Primitive->SetCollisionEnabled(ECollisionEnabled::QueryOnly);
+				break;
+			case ECollisionEnabled::PhysicsOnly:
+				Primitive->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+				break;
+			case ECollisionEnabled::ProbeOnly:
+			case ECollisionEnabled::QueryAndProbe:
+			case ECollisionEnabled::QueryOnly:
+			case ECollisionEnabled::NoCollision:
+			default:
+				break;
+			}
+		}
+	}
+}
 
 URammsCrowdActorSyncProcessor::URammsCrowdActorSyncProcessor()
 	: EntityQuery(*this)
@@ -63,6 +94,10 @@ void URammsCrowdActorSyncProcessor::Execute(FMassEntityManager& EntityManager, F
 			if (bApplyYawOffset)
 			{
 				Transform.SetRotation(Transform.GetRotation() * YawOffset);
+			}
+			if (!Profile.bRepresentationBlocksPhysics && !Actor->Tags.Contains(QueryOnlyTag))
+			{
+				MakeQueryOnly(*Actor);
 			}
 			Actor->SetActorTransform(Transform, /*bSweep*/ false, /*OutHit*/ nullptr, ETeleportType::TeleportPhysics);
 		}

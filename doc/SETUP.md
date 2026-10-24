@@ -62,7 +62,7 @@ matter):
 
 | Trait | Settings |
 |---|---|
-| **RAMMS Crowd Agent** (`URammsCrowdAgentTrait`) | Radius 35; ActorKind Person; GaitVariation 0.25; **RepresentationActorYawOffsetDegrees −90** (City Sample meshes — see gotcha below) |
+| **RAMMS Crowd Agent** (`URammsCrowdAgentTrait`) | Radius 35; ActorKind Person; GaitVariation 0.25; **RepresentationActorYawOffsetDegrees −90** (City Sample meshes — see gotcha below); `bRepresentationBlocksPhysics` off (see below) |
 | **RAMMS Crowd Reaction** (`URammsCrowdReactionTrait`) | Profile = `DA_Reaction_Person` |
 | **RAMMS Representation Support** | (no settings) |
 | Mass Movement | defaults (walk ~140 cm/s ±10%) or a movement style |
@@ -76,6 +76,14 @@ matter):
 | Mass Smooth Orientation | defaults |
 | Mass Distance LOD Collector | defaults |
 | Mass Crowd Visualization | see §5 |
+
+> **Representation actors and robot physics:** spawned crowd actors are teleported to
+their entity every frame, and City Sample's root mesh carries a `PhysicsActor` body set
+(`PA_Base`). Left as `QueryAndPhysics`, those animated bodies act as kinematic,
+infinitely heavy shapes that shove and tip a simulated robot they walk into.
+`URammsCrowdActorSyncProcessor` therefore downgrades them to `QueryOnly` (they stay
+visible to traces: ToF, sonar, line of sight) unless `bRepresentationBlocksPhysics`
+is set; robots are kept clear on the Mass side instead (see §6).
 
 > **Gotcha — missing `AgentRadiusFragment`:** the engine movement/steering/nav/StateTree
 > traits all require an agent radius but none of them provide it. **RAMMS Crowd Agent**
@@ -199,6 +207,13 @@ Two components on the pawn:
      half-length ~55 (wheelchair footprint). Exists because the engine's sync traits
      require a capsule + CharacterMovement, which robot pawns don't have; the paired
      translator mirrors the pawn's transform/velocity into Mass every frame.
+     `bAutoFootprint` (on) fits the collider to the pawn's physically colliding
+     components on the first sync (MeBot: about 120 x 71 cm, centred 28 cm behind the
+     root) and places the entity at the footprint centre; radius / half-length are
+     the fallback. `bKeepCrowdClear` (on) makes the footprint solid for crowd agents:
+     `URammsRobotClearanceProcessor` moves agents out of it after Mass movement and
+     turns their velocity along it, so they walk around a stopped chair and yield to
+     a moving one (`ClearanceMarginCm` 10, `ApproachBandCm` 80).
    - Mass Navigation Obstacle — NPCs steer around the robot.
    - Mass LookAt Target — NPC gaze can target the robot.
    - **No representation/LOD traits** — the real pawn already renders.
