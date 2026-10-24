@@ -14,6 +14,9 @@
 #include "MassMovementFragments.h"
 #include "MassNavigationFragments.h"
 #include "RammsCrowdAgentTrait.h"
+#include "RammsCrowdAnimInstance.h"
+#include "RammsCrowdAnimSet.h"
+#include "RammsCrowdStimulusTypes.h"
 
 URammsCrowdAnimComponent::URammsCrowdAnimComponent()
 {
@@ -31,6 +34,47 @@ FMassEntityHandle URammsCrowdAnimComponent::ResolveEntityHandle()
 	}
 	// Representation actors are pooled: re-resolve every tick rather than caching across frames.
 	return ActorSubsystem->GetEntityHandleFromActor(GetOwner());
+}
+
+void URammsCrowdAnimComponent::BeginPlay()
+{
+	Super::BeginPlay();
+	InstallAnimInstance();
+}
+
+USkeletalMeshComponent* URammsCrowdAnimComponent::ResolveDrivenMesh()
+{
+	USkeletalMeshComponent* Mesh = DrivenMesh.Get();
+	if (Mesh == nullptr)
+	{
+		if (const AActor* Owner = GetOwner())
+		{
+			// Prefer the root mesh: on assembled characters (City Sample) it is the
+			// leader-pose component every clothing/body part follows.
+			Mesh = Cast<USkeletalMeshComponent>(Owner->GetRootComponent());
+			if (Mesh == nullptr)
+			{
+				Mesh = Owner->FindComponentByClass<USkeletalMeshComponent>();
+			}
+		}
+		DrivenMesh = Mesh;
+	}
+	return Mesh;
+}
+
+void URammsCrowdAnimComponent::InstallAnimInstance()
+{
+	USkeletalMeshComponent* Mesh = ResolveDrivenMesh();
+	if (AnimSet == nullptr || Mesh == nullptr)
+	{
+		return;
+	}
+	if (Mesh->GetAnimationMode() != EAnimationMode::AnimationBlueprint || Mesh->GetAnimClass() != URammsCrowdAnimInstance::StaticClass())
+	{
+		Mesh->SetAnimInstanceClass(URammsCrowdAnimInstance::StaticClass());
+	}
+	// The anim instance reads this component's Mass mirror: update it first.
+	Mesh->PrimaryComponentTick.AddPrerequisite(this, PrimaryComponentTick);
 }
 
 void URammsCrowdAnimComponent::SetLookAt(const FVector& InDirection, const bool bInHasTarget)
@@ -76,8 +120,35 @@ void URammsCrowdAnimComponent::TickComponent(const float DeltaTime, const ELevel
 	{
 		GaitVariation = Profile->GaitVariation;
 	}
+	if (const FRammsStimulusFragment* Stimulus = EntityManager.GetFragmentDataPtr<FRammsStimulusFragment>(CachedHandle))
+	{
+		StimulusZone = Stimulus->Zone;
+		bHasStimulus = Stimulus->Zone != ERammsStimulusZone::None;
+		StimulusLocation = Stimulus->StimulusLocation;
+		LastStartleTime = Stimulus->LastStartleTime > -UE_BIG_NUMBER ? Stimulus->LastStartleTime : 0.0f;
+	}
+	else
+	{
+		StimulusZone = ERammsStimulusZone::None;
+		bHasStimulus = false;
+	}
+	if (const FRammsRobotContactFragment* Contact = EntityManager.GetFragmentDataPtr<FRammsRobotContactFragment>(CachedHandle))
+	{
+		RobotContactCount = Contact->ContactCount;
+	}
 
-	if (bDriveSingleNodeAnimation)
+	UpdateDirection();
+
+	if (AnimSet != nullptr)
+	{
+		// Representation blueprints (City Sample) can rebuild their meshes after begin play.
+		USkeletalMeshComponent* Mesh = ResolveDrivenMesh();
+		if (Mesh != nullptr && Mesh->GetAnimClass() != URammsCrowdAnimInstance::StaticClass())
+		{
+			InstallAnimInstance();
+		}
+	}
+	else if (bDriveSingleNodeAnimation)
 	{
 		UpdateDrivenAnimation();
 	}
@@ -124,23 +195,31 @@ void URammsCrowdAnimComponent::ManageLODSync(const float ViewerDistanceCm)
 	}
 }
 
+void URammsCrowdAnimComponent::UpdateDirection()
+{
+	// Trust measured speed, not movement intent: entities keep sliding while
+	// decelerating into Stand (intent already switched) and feet must follow.
+	// Direction of travel relative to the character's visual facing. The mesh is
+	// authored facing +Y (MetaHuman/mannequin convention), so its world facing is the
+	// component's Y axis; falls back to actor forward for X-facing meshes.
+	const USkeletalMeshComponent* Mesh = ResolveDrivenMesh();
+	if (Mesh == nullptr || MassSpeed <= UE_KINDA_SMALL_NUMBER)
+	{
+		DirectionAngleDegrees = 0.0f;
+		return;
+	}
+	const FVector Facing = Mesh == GetOwner()->GetRootComponent()
+		? Mesh->GetRightVector()
+		: GetOwner()->GetActorForwardVector();
+	const FVector VelocityDir = MassVelocity.GetSafeNormal2D();
+	const float Dot = static_cast<float>(FVector::DotProduct(Facing.GetSafeNormal2D(), VelocityDir));
+	const float Sign = FMath::Sign(static_cast<float>(FVector::CrossProduct(Facing, VelocityDir).Z));
+	DirectionAngleDegrees = FMath::RadiansToDegrees(FMath::Acos(FMath::Clamp(Dot, -1.0f, 1.0f))) * Sign;
+}
+
 void URammsCrowdAnimComponent::UpdateDrivenAnimation()
 {
-	USkeletalMeshComponent* Mesh = DrivenMesh.Get();
-	if (Mesh == nullptr)
-	{
-		if (const AActor* Owner = GetOwner())
-		{
-			// Prefer the root mesh: on assembled characters (City Sample) it is the
-			// leader-pose component every clothing/body part follows.
-			Mesh = Cast<USkeletalMeshComponent>(Owner->GetRootComponent());
-			if (Mesh == nullptr)
-			{
-				Mesh = Owner->FindComponentByClass<USkeletalMeshComponent>();
-			}
-		}
-		DrivenMesh = Mesh;
-	}
+	USkeletalMeshComponent* Mesh = ResolveDrivenMesh();
 	// An actual Animation Blueprint takes precedence over this fallback driver — but
 	// AnimationBlueprint mode with a NULL class (e.g. the City Sample crowd pack,
 	// whose anim instance lived in game code not shipped with it) animates nothing,
@@ -161,26 +240,6 @@ void URammsCrowdAnimComponent::UpdateDrivenAnimation()
 		const float Random01 = static_cast<float>(Hash & 0x3FF) / 1023.0f;
 		GaitRateScale = 1.0f + (Random01 - 0.5f) * GaitVariation;
 		bReseeded = true;
-	}
-
-	// Trust measured speed, not movement intent: entities keep sliding while
-	// decelerating into Stand (intent already switched) and feet must follow.
-	// Direction of travel relative to the character's visual facing. The mesh is
-	// authored facing +Y (MetaHuman/mannequin convention), so its world facing is the
-	// component's Y axis; falls back to actor forward for X-facing meshes.
-	if (MassSpeed > UE_KINDA_SMALL_NUMBER)
-	{
-		const FVector Facing = Mesh == GetOwner()->GetRootComponent()
-			? Mesh->GetRightVector()
-			: GetOwner()->GetActorForwardVector();
-		const FVector VelocityDir = MassVelocity.GetSafeNormal2D();
-		const float Dot = static_cast<float>(FVector::DotProduct(Facing.GetSafeNormal2D(), VelocityDir));
-		const float Sign = FMath::Sign(static_cast<float>(FVector::CrossProduct(Facing, VelocityDir).Z));
-		DirectionAngleDegrees = FMath::RadiansToDegrees(FMath::Acos(FMath::Clamp(Dot, -1.0f, 1.0f))) * Sign;
-	}
-	else
-	{
-		DirectionAngleDegrees = 0.0f;
 	}
 
 	// Blend-space path: play once, feed (direction, speed) every tick.

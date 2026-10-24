@@ -5,12 +5,14 @@
 #include "CoreMinimal.h"
 #include "Components/ActorComponent.h"
 #include "MassEntityHandle.h"
+#include "RammsCrowdStimulusTypes.h"
 #include "RammsCrowdAnimComponent.generated.h"
 
 class UAnimationAsset;
 class UAnimSequenceBase;
 class UBlendSpace;
 class ULODSyncComponent;
+class URammsCrowdAnimSet;
 class USkeletalMeshComponent;
 
 /**
@@ -19,9 +21,11 @@ class USkeletalMeshComponent;
  * representation actors are POOLED and recycled, so a cached handle goes stale — and
  * mirrors velocity/movement intent into BlueprintReadOnly properties.
  *
- * AnimBP usage: drive the idle<->walk blendspace with MassSpeed, gate locomotion on
- * bMassIsMoving, and (optionally) head aim with LookAtDirection/bHasLookAtTarget
- * (pushed by URammsCrowdLookAtSyncProcessor).
+ * With an AnimSet it installs URammsCrowdAnimInstance on the actor's leader mesh,
+ * which reads these properties (variety, speed-matched directional walks, carried
+ * props, head look-at, reactions). Without one it falls back to driving a single
+ * blend space or idle/walk pair itself. A mesh with its own Animation Blueprint class
+ * can read the same properties instead.
  */
 UCLASS(ClassGroup = (Ramms), meta = (BlueprintSpawnableComponent))
 class RAMMSCROWD_API URammsCrowdAnimComponent : public UActorComponent
@@ -56,6 +60,37 @@ public:
 
 	/** Called by the look-at sync processor; not intended for gameplay use. */
 	void SetLookAt(const FVector& InDirection, bool bInHasTarget);
+
+	/** True while the entity perceives a stimulus (the robot) in any proxemic zone. */
+	UPROPERTY(BlueprintReadOnly, Category = "Ramms|Crowd")
+	bool bHasStimulus = false;
+
+	/** The proxemic zone the stimulus is in (aware, react, startle). */
+	UPROPERTY(BlueprintReadOnly, Category = "Ramms|Crowd")
+	ERammsStimulusZone StimulusZone = ERammsStimulusZone::None;
+
+	/** World location of the perceived stimulus. */
+	UPROPERTY(BlueprintReadOnly, Category = "Ramms|Crowd")
+	FVector StimulusLocation = FVector::ZeroVector;
+
+	/** World time of the entity's last startle (robot closing fast inside the startle radius). */
+	UPROPERTY(BlueprintReadOnly, Category = "Ramms|Crowd")
+	float LastStartleTime = 0.0f;
+
+	/** How many times the robot has bumped this entity (see URammsRobotClearanceProcessor). */
+	UPROPERTY(BlueprintReadOnly, Category = "Ramms|Crowd")
+	int32 RobotContactCount = 0;
+
+	/** The Mass entity this (pooled) actor represents this frame. */
+	FMassEntityHandle GetRepresentedEntity() const { return CachedHandle; }
+
+	/**
+	 * Animation content for URammsCrowdAnimInstance. When set, the component installs
+	 * that anim instance on the leader mesh at begin play and the single-node driver
+	 * below stands down.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Ramms|Crowd|Animation")
+	TObjectPtr<URammsCrowdAnimSet> AnimSet;
 
 	/**
 	 * When true (and the sibling mesh is NOT using an Animation Blueprint), this
@@ -114,10 +149,14 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Ramms|Crowd|LOD", meta = (ClampMin = "0.0"))
 	float ForceLOD2DistanceCm = 6000.0f;
 
+	virtual void BeginPlay() override;
 	virtual void TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction) override;
 
 private:
 	FMassEntityHandle ResolveEntityHandle();
+	USkeletalMeshComponent* ResolveDrivenMesh();
+	void InstallAnimInstance();
+	void UpdateDirection();
 	void UpdateDrivenAnimation();
 	void ManageLODSync(float ViewerDistanceCm);
 

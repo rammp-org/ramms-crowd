@@ -4,6 +4,7 @@
 
 #include "GameFramework/Actor.h"
 #include "MassActorSubsystem.h"
+#include "MassCommonFragments.h"
 #include "MassExecutionContext.h"
 #include "MassLookAtFragments.h"
 #include "RammsCrowdAgentTrait.h"
@@ -22,6 +23,7 @@ void URammsCrowdLookAtSyncProcessor::ConfigureQueries(const TSharedRef<FMassEnti
 	EntityQuery.AddTagRequirement<FRammsCrowdMemberTag>(EMassFragmentPresence::All);
 	EntityQuery.AddRequirement<FMassLookAtFragment>(EMassFragmentAccess::ReadOnly);
 	EntityQuery.AddRequirement<FMassActorFragment>(EMassFragmentAccess::ReadOnly);
+	EntityQuery.AddRequirement<FTransformFragment>(EMassFragmentAccess::ReadOnly);
 }
 
 void URammsCrowdLookAtSyncProcessor::Execute(FMassEntityManager& EntityManager, FMassExecutionContext& Context)
@@ -30,6 +32,7 @@ void URammsCrowdLookAtSyncProcessor::Execute(FMassEntityManager& EntityManager, 
 	{
 		const TConstArrayView<FMassLookAtFragment> LookAtList = Context.GetFragmentView<FMassLookAtFragment>();
 		const TConstArrayView<FMassActorFragment> ActorList = Context.GetFragmentView<FMassActorFragment>();
+		const TConstArrayView<FTransformFragment> TransformList = Context.GetFragmentView<FTransformFragment>();
 
 		for (FMassExecutionContext::FEntityIterator EntityIt = Context.CreateEntityIterator(); EntityIt; ++EntityIt)
 		{
@@ -43,7 +46,9 @@ void URammsCrowdLookAtSyncProcessor::Execute(FMassEntityManager& EntityManager, 
 			{
 				const FMassLookAtFragment& LookAt = LookAtList[EntityIt];
 				const bool bHasTarget = LookAt.LookAtMode != EMassLookAtMode::LookForward;
-				AnimBridge->SetLookAt(LookAt.Direction, bHasTarget);
+				// Mass keeps the look-at direction in the agent's local frame; the anim layer wants world.
+				const FVector WorldDirection = TransformList[EntityIt].GetTransform().TransformVectorNoScale(LookAt.Direction);
+				AnimBridge->SetLookAt(WorldDirection, bHasTarget);
 			}
 		}
 	});
