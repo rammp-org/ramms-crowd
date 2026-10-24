@@ -36,6 +36,17 @@ struct RAMMSCROWD_API FRammsCrowdProfileParameters : public FMassConstSharedFrag
 	 */
 	UPROPERTY(EditAnywhere, Category = "Ramms|Crowd", meta = (ClampMin = "-180.0", ClampMax = "180.0"))
 	float RepresentationActorYawOffsetDegrees = 0.0f;
+
+	/**
+	 * Let spawned representation actors keep physical (QueryAndPhysics) collision.
+	 * Off by default: the actors are teleported to their entity every frame, so their
+	 * animated bodies (City Sample's PA_Base) act as kinematic, infinitely heavy
+	 * shapes that shove and tip simulated robots on contact. Off downgrades them to
+	 * QueryOnly, which keeps them visible to traces (ToF / sonar / line-of-sight) and
+	 * leaves keeping agents out of robots to URammsRobotClearanceProcessor.
+	 */
+	UPROPERTY(EditAnywhere, Category = "Ramms|Crowd")
+	bool bRepresentationBlocksPhysics = false;
 };
 
 /**
