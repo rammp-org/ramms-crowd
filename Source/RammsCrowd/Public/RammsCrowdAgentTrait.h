@@ -15,6 +15,28 @@ struct FRammsCrowdMemberTag : public FMassTag
 	GENERATED_BODY()
 };
 
+/**
+ * Contact between a crowd member and a robot footprint, written by
+ * URammsRobotClearanceProcessor and read by the animation layer (a bump reaction).
+ */
+USTRUCT()
+struct RAMMSCROWD_API FRammsRobotContactFragment : public FMassFragment
+{
+	GENERATED_BODY()
+
+	/** Number of separate contacts so far: each time the agent is pushed back out of a robot's clearance after being clear of it. */
+	UPROPERTY()
+	int32 ContactCount = 0;
+
+	/** World time of the last contact. */
+	UPROPERTY()
+	float LastContactTime = 0.0f;
+
+	/** Whether the agent was in contact last frame. */
+	UPROPERTY()
+	bool bInContact = false;
+};
+
 /** Per-archetype crowd profile data shared by all entities of one kind. */
 USTRUCT()
 struct RAMMSCROWD_API FRammsCrowdProfileParameters : public FMassConstSharedFragment

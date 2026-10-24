@@ -35,27 +35,73 @@ Any skeletal mesh works. Recipe (this is exactly how the mannequin-based
    on the mesh component if it's a child, or via the agent trait's
    `RepresentationActorYawOffsetDegrees` if the mesh is the actor root.
 3. Point the entity config's Mass Crowd Visualization `HighResTemplateActor` at it.
-4. Animation: either give the anim component a locomotion blend space for the mesh's
-   skeleton (preferred, below), or just assign `IdleAnim`/`WalkAnim` sequences +
-   `WalkAnimReferenceSpeedCmS` for hard-switching playback.
+4. Animation: give the anim component a `URammsCrowdAnimSet` built for the mesh's
+   skeleton (preferred, see "Crowd animation" below), or a locomotion blend space, or
+   just `IdleAnim`/`WalkAnim` sequences + `WalkAnimReferenceSpeedCmS` for
+   hard-switching playback.
 
 MetaHumans: use the optimized/runtime export preset (hair cards — strands are also
 unreliable for ray-traced sensor views), retarget idle/walk onto the MetaHuman skeleton
 once with the IK Retargeter, then follow the recipe. Budget 2–4 distinct MetaHumans and
 keep the `LODMaxCount` cap in mind.
 
-### Animation tuning (`URammsCrowdAnimComponent`)
+### Crowd animation (`URammsCrowdAnimSet` + `URammsCrowdAnimInstance`)
 
-The component reads Mass data each tick (speed, travel direction relative to facing,
-gait variation) and drives the mesh — no AnimBP needed:
+When the anim component's `AnimSet` is set (the shipped `BP_CrowdPerson_CS` points at
+`/Game/NPCs/DA_CrowdAnimSet`), the component installs `URammsCrowdAnimInstance` on
+the actor's leader mesh at begin play. It is a graph-less anim instance (no
+Animation Blueprint asset) that builds each pedestrian's pose from Mass data:
+
+![The same plaza with the old single blend space (left) and the crowd anim instance (right)](images/crowd_anim_before_after.webp)
+
+- **Variety.** Per body type (City Sample gender and build) the set lists forward walk
+  variants, a brisk walk, idles and carry styles. Each pedestrian gets one walk, one
+  idle and, with `CarryChance`, something to carry: phone (looking at it, talking,
+  holding), cup, backpack, briefcase or purse. The hold pose is layered over just
+  the holding arm (and the head, for looking down at a phone), and the prop is put on
+  the matching hand bone or the backpack socket in the actor's `Accessory`
+  component. Picks are seeded by the Mass entity, so a pooled actor recycled onto
+  another entity becomes someone else.
+- **No foot sliding.** The forward walk, brisk walk and the shared directional walks
+  (diagonals, sidesteps, backwards) are blended by the angle between facing and
+  travel and by speed. All of them share one gait phase through their L/R foot sync
+  markers, so blended clips plant the same foot together, and they play at the rate
+  that makes their root speed equal the agent's measured speed (clamped to
+  `MinPlayRate`..`MaxPlayRate`). Below `IdleBlendEndCmS` the idle blends in.
+- **Noticing the robot.** Inside the stimulus react radius every pedestrian turns its
+  head (spread down the neck and upper spine, within `LookAtMaxYawDegrees` /
+  `LookAtMaxPitchDegrees`) toward the robot's user; in the aware radius a share of
+  them (`WatchRobotChance`) do. A Mass look-at target set by a StateTree takes
+  precedence.
+- **Reactions.** A startle (the robot closing fast inside the startle radius) or a
+  bump (`URammsRobotClearanceProcessor` pushing the agent out of the footprint, counted
+  in `FRammsRobotContactFragment`) plays an upper-body flinch from `Reactions`, with
+  `ReactionCooldownSeconds` between them.
+
+Build or refresh the set from the City Sample pack with
+`Content/Python/ramms_crowd_build_anim_set.py` (it measures every walk's root speed and
+direction, and assigns the set to `BP_CrowdPerson_CS`). Tuning lives on the asset, so
+open `DA_CrowdAnimSet` to change carry chances, blend speeds or look-at limits; it
+takes effect on the next PIE run. For another skeleton, fill a set with that
+skeleton's clips: the bones it uses by name are `clavicle_l/r` (carry layers),
+`neck_01` (phone head), `spine_01..05`, `neck_02`, `head` (reactions and look-at) and
+the clips' "L" sync markers (gait phase; a clip without them counts as one cycle).
+
+`URammsCrowdAnimInstance` exposes what each pedestrian picked (`BodyKey`, `WalkName`,
+`IdleName`, `CarryName`) and its `LocomotionPlayRate`, `FootSpeedCmS` and
+`ReactionCount` for debugging.
+
+### Fallback animation (`URammsCrowdAnimComponent` without an anim set)
+
+Without an `AnimSet` the component drives the mesh itself as a single node:
 
 | Property | Effect |
 |---|---|
 | `LocomotionBlendSpace` | Direction × Speed blend space, fed live. The shipped `BS_CrowdLocomotion` covers ±180° at walk speed plus idle and quick-walk rows |
 | `IdleAnim` / `WalkAnim` / `WalkAnimReferenceSpeedCmS` | fallback pair when no blend space; ref speed = ground speed the walk was authored at (measure it — see scripted authoring) |
 | `GaitVariation` (via agent trait) | per-agent play-rate jitter and phase desync (±half the value) |
-| `ForceLOD0/1/2DistanceCm` | distance clamp for the City Sample LODSync (arm bones vanish at mesh LOD 2+); raise to trade fidelity for GPU headroom |
-| `DirectionAngleDegrees`, `MassSpeed`, `bMassIsMoving`, `LookAtDirection` | BlueprintReadOnly outputs — if you later build a real AnimBP (blend smoothing, head aim, motion matching), read these; the component auto-yields to any mesh with an AnimBP class set |
+| `ForceLOD0/1/2DistanceCm` | distance clamp for the City Sample LODSync (arm bones vanish at mesh LOD 2+); raise to trade fidelity for GPU headroom. Applies with or without an anim set |
+| `DirectionAngleDegrees`, `MassSpeed`, `bMassIsMoving`, `LookAtDirection` (world space), `StimulusZone`, `StimulusLocation`, `LastStartleTime`, `RobotContactCount` | BlueprintReadOnly outputs for your own anim instance or AnimBP; the single-node driver yields to any mesh with an anim class set |
 
 The blend space itself is a normal asset — open `BS_CrowdLocomotion` to retune axis
 smoothing or swap sample clips. If you *script* blend-space edits, call
@@ -163,6 +209,7 @@ for the pieces the stock Python API can't reach:
 | Call | Purpose |
 |---|---|
 | `unreal.RammsCrowdStateTreeLibrary.create_pedestrian_wander_state_tree(path, name)` | build + compile the baseline pedestrian StateTree |
+| `Content/Python/ramms_crowd_build_anim_set.py` | build `DA_CrowdAnimSet` from the City Sample pack (measured walk speeds/directions, carry styles, reactions) and assign it to `BP_CrowdPerson_CS` |
 | `unreal.RammsCrowdAnimAssetLibrary.rebuild_blend_space(bs)` | validate/resample a blend space after scripted edits (mandatory) |
 | `unreal.RammsCrowdZoneGraphLibrary.update_zone_shape(comp)` | recompute a `UZoneShapeComponent` after setting its points from script |
 | `unreal.RammsCrowdZoneGraphLibrary.rebuild_zone_graph()` | trigger the Build ZoneGraph action |

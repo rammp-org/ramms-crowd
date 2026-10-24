@@ -2,6 +2,7 @@
 
 #include "RammsRobotClearanceProcessor.h"
 
+#include "Engine/World.h"
 #include "MassCommonFragments.h"
 #include "MassCommonTypes.h"
 #include "MassExecutionContext.h"
@@ -43,10 +44,11 @@ void URammsRobotClearanceProcessor::ConfigureQueries(const TSharedRef<FMassEntit
 	CrowdQuery.AddRequirement<FTransformFragment>(EMassFragmentAccess::ReadWrite);
 	CrowdQuery.AddRequirement<FMassVelocityFragment>(EMassFragmentAccess::ReadWrite);
 	CrowdQuery.AddRequirement<FAgentRadiusFragment>(EMassFragmentAccess::ReadOnly);
+	CrowdQuery.AddRequirement<FRammsRobotContactFragment>(EMassFragmentAccess::ReadWrite, EMassFragmentPresence::Optional);
 }
 
 bool URammsRobotClearanceProcessor::ResolveAgainstFootprint(const FVector2D& SegA, const FVector2D& SegB, const double Clearance,
-	const double ApproachBand, FVector2D& InOutPosition, FVector2D& InOutVelocity)
+	const double ApproachBand, FVector2D& InOutPosition, FVector2D& InOutVelocity, bool* bOutContact)
 {
 	const FVector2D AB = SegB - SegA;
 	const double LengthSq = AB.SizeSquared();
@@ -76,6 +78,10 @@ bool URammsRobotClearanceProcessor::ResolveAgainstFootprint(const FVector2D& Seg
 		InOutPosition = Closest + Normal * Clearance;
 		Distance = Clearance;
 		bChanged = true;
+		if (bOutContact != nullptr)
+		{
+			*bOutContact = true;
+		}
 	}
 
 	const double Inward = FVector2D::DotProduct(InOutVelocity, Normal);
@@ -146,8 +152,10 @@ void URammsRobotClearanceProcessor::Execute(FMassEntityManager& EntityManager, F
 		return;
 	}
 
-	CrowdQuery.ForEachEntityChunk(Context, [&Footprints](FMassExecutionContext& Context)
+	const float Now = Context.GetWorld() != nullptr ? static_cast<float>(Context.GetWorld()->GetTimeSeconds()) : 0.0f;
+	CrowdQuery.ForEachEntityChunk(Context, [&Footprints, Now](FMassExecutionContext& Context)
 	{
+		const TArrayView<FRammsRobotContactFragment> ContactList = Context.GetMutableFragmentView<FRammsRobotContactFragment>();
 		const TArrayView<FTransformFragment> TransformList = Context.GetMutableFragmentView<FTransformFragment>();
 		const TArrayView<FMassVelocityFragment> VelocityList = Context.GetMutableFragmentView<FMassVelocityFragment>();
 		const TConstArrayView<FAgentRadiusFragment> RadiusList = Context.GetFragmentView<FAgentRadiusFragment>();
@@ -160,10 +168,24 @@ void URammsRobotClearanceProcessor::Execute(FMassEntityManager& EntityManager, F
 			FVector2D Velocity2D(Velocity);
 
 			bool bChanged = false;
+			bool bContact = false;
 			for (const FRammsFootprint& Footprint : Footprints)
 			{
 				const double Clearance = Footprint.Radius + RadiusList[EntityIt].Radius + Footprint.Margin;
-				bChanged |= ResolveAgainstFootprint(Footprint.SegA, Footprint.SegB, Clearance, Footprint.ApproachBand, Position, Velocity2D);
+				bChanged |= ResolveAgainstFootprint(Footprint.SegA, Footprint.SegB, Clearance, Footprint.ApproachBand, Position, Velocity2D, &bContact);
+			}
+			if (!ContactList.IsEmpty())
+			{
+				FRammsRobotContactFragment& Contact = ContactList[EntityIt];
+				if (bContact)
+				{
+					if (!Contact.bInContact)
+					{
+						++Contact.ContactCount;
+					}
+					Contact.LastContactTime = Now;
+				}
+				Contact.bInContact = bContact;
 			}
 			if (bChanged)
 			{

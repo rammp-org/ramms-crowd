@@ -13,6 +13,7 @@ void URammsCrowdAgentTrait::BuildTemplate(FMassEntityTemplateBuildContext& Build
 
 	BuildContext.AddFragment_GetRef<FAgentRadiusFragment>().Radius = AgentRadiusCm;
 	BuildContext.AddTag<FRammsCrowdMemberTag>();
+	BuildContext.AddFragment<FRammsRobotContactFragment>();
 
 	const FConstSharedStruct ProfileFragment = EntityManager.GetOrCreateConstSharedFragment(ProfileParameters);
 	BuildContext.AddConstSharedFragment(ProfileFragment);

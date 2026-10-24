@@ -2,3 +2,4 @@ Binaries/
 Intermediate/
 DerivedDataCache/
 .DS_Store
+__pycache__/

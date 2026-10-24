@@ -159,17 +159,20 @@ adds:
 - **CollisionCapsule** (`UCapsuleComponent`, r=35 h=90 at Z+90): QueryOnly, **blocks
   Visibility and Camera** only — this is what the ToF/sonar **CPU LineTrace fallback**
   hits. Ignores everything else so it never fights physics.
-- **RammsCrowdAnim** (`URammsCrowdAnimComponent`): drives locomotion animation from Mass
-  data and manages mesh LOD (below). No AnimBP required.
+- **RammsCrowdAnim** (`URammsCrowdAnimComponent`): mirrors Mass data for animation,
+  installs the crowd anim instance when given an anim set, and manages mesh LOD
+  (below). No AnimBP required.
 - Skeletal meshes should be **Visible in Ray Tracing** (GPU sensor rays hit skinned
   geometry; skinned motion produces real camera motion vectors). Ensure
   `r.RayTracing.Geometry.SkeletalMeshes=1` when RT is on.
 
-Animation: the anim component plays `BS_CrowdLocomotion` (a Direction × Speed blend
-space over the City Sample locomotion set) as a single node and feeds it
-(direction, speed) every tick — blended turns, starts/stops, backpedaling, with
-per-agent phase/rate desync from `GaitVariation`. See CUSTOMIZATION.md to retune or
-replace it.
+Animation: the anim component's `AnimSet` is `DA_CrowdAnimSet` (built by
+`Content/Python/ramms_crowd_build_anim_set.py`), so each pedestrian runs
+`URammsCrowdAnimInstance`: its body type's walk and idle variants, directional walks
+played at the rate that matches the feet to its speed, a carried phone, cup or bag on
+some, head turns toward the robot and a flinch when it is startled or bumped. Without
+an anim set the component falls back to playing `BS_CrowdLocomotion` (a Direction ×
+Speed blend space) as a single node. See CUSTOMIZATION.md, "Crowd animation".
 
 On the entity config's **Mass Crowd Visualization** trait:
 
