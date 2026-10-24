@@ -52,6 +52,8 @@ When the anim component's `AnimSet` is set (the shipped `BP_CrowdPerson_CS` poin
 the actor's leader mesh at begin play. It is a graph-less anim instance (no
 Animation Blueprint asset) that builds each pedestrian's pose from Mass data:
 
+![The same plaza with the old single blend space (left) and the crowd anim instance (right)](images/crowd_anim_before_after.webp)
+
 - **Variety.** Per body type (City Sample gender and build) the set lists forward walk
   variants, a brisk walk, idles and carry styles. Each pedestrian gets one walk, one
   idle and, with `CarryChance`, something to carry: phone (looking at it, talking,
