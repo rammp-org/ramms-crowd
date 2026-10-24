@@ -135,6 +135,7 @@ void URammsCrowdAnimComponent::TickComponent(const float DeltaTime, const ELevel
 	if (const FRammsRobotContactFragment* Contact = EntityManager.GetFragmentDataPtr<FRammsRobotContactFragment>(CachedHandle))
 	{
 		RobotContactCount = Contact->ContactCount;
+		RobotPassSide = Contact->PassSide;
 	}
 
 	UpdateDirection();

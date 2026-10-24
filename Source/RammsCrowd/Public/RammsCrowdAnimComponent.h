@@ -81,6 +81,10 @@ public:
 	UPROPERTY(BlueprintReadOnly, Category = "Ramms|Crowd")
 	int32 RobotContactCount = 0;
 
+	/** Side the entity plans to pass the robot on: +1 its right, -1 its left, 0 none (see URammsRobotClearanceProcessor::PlanPass). */
+	UPROPERTY(BlueprintReadOnly, Category = "Ramms|Crowd")
+	int32 RobotPassSide = 0;
+
 	/** The Mass entity this (pooled) actor represents this frame. */
 	FMassEntityHandle GetRepresentedEntity() const { return CachedHandle; }
 

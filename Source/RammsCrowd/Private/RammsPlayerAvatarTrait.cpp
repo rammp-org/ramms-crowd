@@ -37,6 +37,12 @@ void URammsPlayerAvatarTrait::BuildTemplate(FMassEntityTemplateBuildContext& Bui
 	Footprint.bKeepCrowdClear = bKeepCrowdClear;
 	Footprint.ClearanceMarginCm = ClearanceMarginCm;
 	Footprint.ApproachBandCm = ApproachBandCm;
+	Footprint.bAnticipatePassing = bAnticipatePassing;
+	Footprint.bPassOnRight = bPassOnRight;
+	Footprint.PassingLookaheadSeconds = PassingLookaheadSeconds;
+	Footprint.PassingComfortCm = PassingComfortCm;
+	Footprint.PassingSlowdownFraction = PassingSlowdownFraction;
+	Footprint.PassingSlowdownBandCm = PassingSlowdownBandCm;
 	BuildContext.AddFragment(FConstStructView::Make(Footprint));
 
 	BuildContext.AddTag<FRammsPlayerAvatarTag>();

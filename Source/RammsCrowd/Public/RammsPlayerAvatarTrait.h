@@ -37,6 +37,14 @@ struct RAMMSCROWD_API FRammsAvatarFootprintFragment : public FMassFragment
 	bool bKeepCrowdClear = true;
 	float ClearanceMarginCm = 10.0f;
 	float ApproachBandCm = 80.0f;
+
+	/** Plan passes ahead of time: pick a side (the right, when head-on) and slow down alongside. */
+	bool bAnticipatePassing = true;
+	bool bPassOnRight = true;
+	float PassingLookaheadSeconds = 3.0f;
+	float PassingComfortCm = 35.0f;
+	float PassingSlowdownFraction = 0.7f;
+	float PassingSlowdownBandCm = 120.0f;
 };
 
 /** Finite-differencing state for the avatar translator. */
@@ -107,6 +115,34 @@ public:
 	/** Distance beyond the clearance over which agents start turning around the robot, cm. */
 	UPROPERTY(EditAnywhere, Category = "Ramms|Crowd", meta = (ClampMin = "0.0", EditCondition = "bKeepCrowdClear"))
 	float ApproachBandCm = 80.0f;
+
+	/**
+	 * Agents on course to pass close to the robot plan the pass ahead of time, as
+	 * people do: they pick a side early and drift over gradually instead of swerving
+	 * at the last moment, and slow down while squeezing past.
+	 */
+	UPROPERTY(EditAnywhere, Category = "Ramms|Crowd|Passing", meta = (EditCondition = "bKeepCrowdClear"))
+	bool bAnticipatePassing = true;
+
+	/** When a pass is head-on (either side would do), keep right. Otherwise agents keep the side they are already on. */
+	UPROPERTY(EditAnywhere, Category = "Ramms|Crowd|Passing", meta = (EditCondition = "bKeepCrowdClear && bAnticipatePassing"))
+	bool bPassOnRight = true;
+
+	/** How far ahead, in seconds of closing, agents start planning the pass. */
+	UPROPERTY(EditAnywhere, Category = "Ramms|Crowd|Passing", meta = (ClampMin = "0.1", EditCondition = "bKeepCrowdClear && bAnticipatePassing"))
+	float PassingLookaheadSeconds = 3.0f;
+
+	/** Extra room, beyond the clearance, a planned pass leaves the robot, cm. */
+	UPROPERTY(EditAnywhere, Category = "Ramms|Crowd|Passing", meta = (ClampMin = "0.0", EditCondition = "bKeepCrowdClear && bAnticipatePassing"))
+	float PassingComfortCm = 35.0f;
+
+	/** Share of its walking speed an agent keeps right at the clearance while approaching or passing (1 = no slowdown). */
+	UPROPERTY(EditAnywhere, Category = "Ramms|Crowd|Passing", meta = (ClampMin = "0.1", ClampMax = "1.0", EditCondition = "bKeepCrowdClear && bAnticipatePassing"))
+	float PassingSlowdownFraction = 0.7f;
+
+	/** Distance beyond the clearance over which that slowdown eases in, cm. */
+	UPROPERTY(EditAnywhere, Category = "Ramms|Crowd|Passing", meta = (ClampMin = "0.0", EditCondition = "bKeepCrowdClear && bAnticipatePassing"))
+	float PassingSlowdownBandCm = 120.0f;
 
 protected:
 	virtual void BuildTemplate(FMassEntityTemplateBuildContext& BuildContext, const UWorld& World) const override;

@@ -145,9 +145,13 @@ One `URammsCrowdReactionProfile` per kind; all proxemics/response tuning lives h
 | Pet | 900 | 500 | 250 | 100 | 2 s | 300 cm | flees via escape lanes |
 
 Semantics: an NPC classifies into Aware/React/Startle zones by distance to the nearest
-stimulus source, with exit hysteresis; approaching faster than `StartleSpeed` inside the
-React zone startles early (the "fast robot" rule); `Cooldown` suppresses repeat
-startles. `ExtensionParams` accepts user-defined `FMassConstSharedFragment` structs so
+stimulus source, with exit hysteresis; the stimulus approaching faster than
+`StartleSpeed` inside the React zone startles early (the "fast robot" rule); `Cooldown`
+suppresses repeat startles. With `bStartleOnlyWhenStimulusMoves` (on) only the robot
+coming at an NPC startles it: inside the Startle radius it must be moving toward the NPC
+at `StartleMinStimulusSpeedCmS` (30) or more, and the fast-approach rule uses the
+robot's own speed toward the NPC rather than the closing speed. Someone walking past
+(or toward) a parked wheelchair is not startled into backing away from it. `ExtensionParams` accepts user-defined `FMassConstSharedFragment` structs so
 custom StateTree tasks/conditions can read new parameters without touching plugin code.
 
 ## 5. Representation & sensors (`BP_CrowdPerson_CS`)
@@ -216,7 +220,13 @@ Two components on the pawn:
      the fallback. `bKeepCrowdClear` (on) makes the footprint solid for crowd agents:
      `URammsRobotClearanceProcessor` moves agents out of it after Mass movement and
      turns their velocity along it, so they walk around a stopped chair and yield to
-     a moving one (`ClearanceMarginCm` 10, `ApproachBandCm` 80).
+     a moving one (`ClearanceMarginCm` 10, `ApproachBandCm` 80). With
+     `bAnticipatePassing` (on) agents on course to pass close by plan the pass up to
+     `PassingLookaheadSeconds` (3) ahead: they keep the side they are on, or keep
+     right (`bPassOnRight`) when it is head-on, turn gradually (at most 150°/s) so they
+     pass `PassingComfortCm` (35) outside the clearance, and slow to
+     `PassingSlowdownFraction` (0.7) of their speed alongside the robot, easing in
+     over `PassingSlowdownBandCm` (120).
    - Mass Navigation Obstacle — NPCs steer around the robot.
    - Mass LookAt Target — NPC gaze can target the robot.
    - **No representation/LOD traits** — the real pawn already renders.
@@ -263,10 +273,13 @@ ViewerDist=...`) — an invisible crowd is diagnosable from the log alone.
 
 Behavior checklist (PIE, driving the robot):
 - Agents stream along lanes, branch at junctions, pause (Stand) between legs.
-- Crowd parts around the moving/parked robot and rejoins lanes.
-- Slow approach startles only inside the Startle radius; **fast approach startles from
-  the React radius** (closing-speed rule); startled agents back away *while facing the
-  robot*, then resume; repeat startle within the cooldown is suppressed.
+- Crowd parts around the moving/parked robot and rejoins lanes: passes are planned a
+  few metres out (keeping right when head-on), turn gently, keep a comfortable gap and
+  slow down alongside the chair.
+- A parked robot startles nobody. A robot driving at an agent startles it inside the
+  Startle radius; **driving at it fast startles from the React radius**; startled
+  agents back away *while facing the robot*, then resume; repeat startle within the
+  cooldown is suppressed.
 - Sensor pass: ToF/sonar depth on a pedestrian at 2–4 m correct on **both** GPU-ray and
   CPU-fallback paths; camera capture shows nonzero motion vectors on walking NPCs; no
   representation swap inside sensor range.
