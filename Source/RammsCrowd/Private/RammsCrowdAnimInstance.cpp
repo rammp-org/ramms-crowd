@@ -292,6 +292,8 @@ struct FRammsCrowdMotionMatching
 	bool bResetHistory = true;
 	EPhase Phase = EPhase::Stand;
 	float PhaseSeconds = 0.0f;
+	/** A clip has been picked since the phase began (start / stop clips then play out). */
+	bool bPhaseClipChosen = false;
 	/** Playing clips, oldest first; the last is the current one, fading in over the others. */
 	TArray<FLayer, TInlineAllocator<4>> Layers;
 	float SinceSearch = UE_BIG_NUMBER;
@@ -311,6 +313,7 @@ struct FRammsCrowdMotionMatching
 		Past.Reset();
 		Phase = EPhase::Stand;
 		PhaseSeconds = 0.0f;
+		bPhaseClipChosen = false;
 	}
 };
 
@@ -329,6 +332,29 @@ namespace
 		const FTransform A = Sequence->ExtractRootTrackTransform(FAnimExtractContext(static_cast<double>(Start)), nullptr);
 		const FTransform B = Sequence->ExtractRootTrackTransform(FAnimExtractContext(static_cast<double>(End)), nullptr);
 		return static_cast<float>((B.GetLocation() - A.GetLocation()).Size2D() / (End - Start));
+	}
+
+	/** Cumulative ground distance of a clip's root motion, sampled at 30 Hz (cached per clip; game thread). */
+	const TArray<float>& RootDistanceTable(const UAnimSequence* Sequence)
+	{
+		static TMap<TObjectKey<UAnimSequence>, TArray<float>> Cache;
+		TArray<float>& Table = Cache.FindOrAdd(TObjectKey<UAnimSequence>(Sequence));
+		if (Table.IsEmpty() && Sequence != nullptr)
+		{
+			const float Length = Sequence->GetPlayLength();
+			const int32 Count = FMath::Max(2, FMath::CeilToInt(Length * 30.0f) + 1);
+			FVector Previous = Sequence->ExtractRootTrackTransform(FAnimExtractContext(0.0), nullptr).GetLocation();
+			float Sum = 0.0f;
+			Table.Add(0.0f);
+			for (int32 I = 1; I < Count; ++I)
+			{
+				const FVector At = Sequence->ExtractRootTrackTransform(FAnimExtractContext(static_cast<double>(FMath::Min(I / 30.0f, Length))), nullptr).GetLocation();
+				Sum += static_cast<float>((At - Previous).Size2D());
+				Previous = At;
+				Table.Add(Sum);
+			}
+		}
+		return Table;
 	}
 
 	FQuat YawOnly(const FQuat& Rotation)
@@ -358,7 +384,11 @@ bool URammsCrowdAnimInstance::UpdateMotionMatching(const float DeltaSeconds)
 	const FTransform ComponentTransform = Mesh->GetComponentTransform();
 	const FVector Position = ComponentTransform.GetLocation();
 	const FQuat Facing = YawOnly(ComponentTransform.GetRotation());
-	const FQuat MeshToActor = Facing * YawOnly(Comp->GetOwner()->GetActorQuat()).Inverse();
+	// The body faces the mesh's +Y (City Sample / MetaHuman / UEFN convention, as in
+	// the clips), not the actor's X: the facing that means "walking along V" is V's
+	// yaw plus this offset.
+	const FVector BodyForward = ComponentTransform.GetRotation().RotateVector(FVector::YAxisVector).GetSafeNormal2D();
+	const float MeshYawOffset = FRotator3f::NormalizeAxis(static_cast<float>(Facing.Rotator().Yaw - FMath::RadiansToDegrees(FMath::Atan2(BodyForward.Y, BodyForward.X))));
 	State.Past.Add({ State.Clock, Position, Facing });
 	while (State.Past.Num() > 2 && State.Clock - State.Past[1].Time > 1.0)
 	{
@@ -395,19 +425,19 @@ bool URammsCrowdAnimInstance::UpdateMotionMatching(const float DeltaSeconds)
 	FVector PathDirection = Comp->MassPathDirection.GetSafeNormal2D();
 	if (PathDirection.IsNearlyZero())
 	{
-		PathDirection = Speed0 > StandSpeed ? Velocity.GetSafeNormal2D() : Comp->GetOwner()->GetActorForwardVector().GetSafeNormal2D();
+		PathDirection = Speed0 > StandSpeed ? Velocity.GetSafeNormal2D() : BodyForward;
 	}
-	const float TargetSpeed = Comp->bMassIsMoving ? Comp->MassDesiredSpeed : 0.0f;
+	// Standing agents may still be finishing the approach to their stand point.
+	const float TargetSpeed = Comp->bMassIsMoving ? Comp->MassDesiredSpeed : (Comp->MassDistanceToStop > 0.0f ? Speed0 : 0.0f);
 	if (Speed0 < StandSpeed && TargetSpeed < StandSpeed)
 	{
 		// Shuffling under avoidance: treat as standing rather than walking in place.
 		Velocity = FVector::ZeroVector;
 	}
-	float Remaining = Comp->bMassStopsAtGoal ? Comp->MassDistanceToGoal : UE_BIG_NUMBER;
+	float Remaining = Comp->bMassStopsAtGoal ? Comp->MassDistanceToStop : UE_BIG_NUMBER;
 	const float Tau = FMath::Max(AnimSet->TrajectoryResponseSeconds, 0.01f);
 	const float StepDecay = FMath::Exp(-0.1f / Tau);
 	float FacingYaw = static_cast<float>(Facing.Rotator().Yaw);
-	const float MeshYawOffset = static_cast<float>(MeshToActor.Rotator().Yaw);
 	FVector At = Position;
 	float Speed1 = Speed0;
 	AddSample(0.0f, Position, Facing);
@@ -447,6 +477,23 @@ bool URammsCrowdAnimInstance::UpdateMotionMatching(const float DeltaSeconds)
 	{
 		Want = EPhase::Start;
 	}
+	// A start or stop clip, once chosen, plays out: re-searching mid-transition would
+	// hop between left- and right-foot variants and tangle the feet. Stay in Stop
+	// until its clip has nearly finished even once Mass reports standing.
+	const bool bTransitionPlaying = (State.Phase == EPhase::Stop || State.Phase == EPhase::Start) && State.bPhaseClipChosen
+		&& !State.Layers.IsEmpty() && !State.Layers.Last().bLooping
+		&& State.Layers.Last().Time < State.Layers.Last().Sequence->GetPlayLength() - 0.2f;
+	if (bTransitionPlaying && State.Phase == EPhase::Stop && Want == EPhase::Stand)
+	{
+		Want = EPhase::Stop;
+	}
+	// Hysteresis: once stopping, only walk on again if the pedestrian clearly carries on
+	// (short wander legs otherwise flip Move <-> Stop every few tenths of a second, and
+	// every flip is a cross-fade).
+	if (State.Phase == EPhase::Stop && Want == EPhase::Move && Speed1 < 2.5f * StandSpeed)
+	{
+		Want = EPhase::Stop;
+	}
 	State.PhaseSeconds += DeltaSeconds;
 	bool bPhaseChanged = false;
 	if (Want != State.Phase && (State.PhaseSeconds > 0.25f || State.Phase == EPhase::Stand || Want == EPhase::Stop))
@@ -454,6 +501,7 @@ bool URammsCrowdAnimInstance::UpdateMotionMatching(const float DeltaSeconds)
 		State.Phase = Want;
 		State.PhaseSeconds = 0.0f;
 		bPhaseChanged = true;
+		State.bPhaseClipChosen = false;
 	}
 	static const FName PhaseNames[] = { TEXT("Stand"), TEXT("Start"), TEXT("Move"), TEXT("Stop") };
 	MotionPhase = PhaseNames[static_cast<int32>(State.Phase)];
@@ -493,7 +541,8 @@ bool URammsCrowdAnimInstance::UpdateMotionMatching(const float DeltaSeconds)
 
 	// Search now and then (and as soon as the pose history has a pose in it).
 	State.SinceSearch += DeltaSeconds;
-	if (!State.History.IsEmpty() && (State.Layers.IsEmpty() || bPhaseChanged || bClipEnding || State.SinceSearch >= AnimSet->MotionMatchingSearchInterval))
+	const bool bPeriodicSearch = State.SinceSearch >= AnimSet->MotionMatchingSearchInterval && !bTransitionPlaying;
+	if (!State.History.IsEmpty() && (State.Layers.IsEmpty() || bPhaseChanged || bClipEnding || bPeriodicSearch))
 	{
 		State.SinceSearch = 0.0f;
 		FPoseSearchContinuingProperties Continuing;
@@ -522,6 +571,7 @@ bool URammsCrowdAnimInstance::UpdateMotionMatching(const float DeltaSeconds)
 				State.Layers.Add({ Sequence, Time, State.Layers.IsEmpty() ? 1.0f : 0.0f, IndexAsset != nullptr && IndexAsset->IsLooping() });
 				MotionMatchedClip = Sequence->GetFName();
 				++MotionMatchSwitches;
+				State.bPhaseClipChosen = true;
 			}
 		}
 	}
@@ -554,17 +604,63 @@ bool URammsCrowdAnimInstance::UpdateMotionMatching(const float DeltaSeconds)
 		}
 	}
 
-	// Play the clips at about the agent's speed so the feet keep up with the body.
+	// Keep the feet at the agent's speed: part by playing the clip faster or slower,
+	// the rest by lengthening or shortening the steps (stride warping), so neither
+	// shows on its own.
 	const float RootSpeed = ClipRootSpeed(Current.Sequence, Current.Time);
 	const float AgentSpeed = Speed0;
-	LocomotionPlayRate = RootSpeed > 30.0f && AgentSpeed > 30.0f
-		? FMath::Clamp(AgentSpeed / RootSpeed, AnimSet->MotionMatchingMinPlayRate, FMath::Max(AnimSet->MotionMatchingMaxPlayRate, AnimSet->MotionMatchingMinPlayRate))
-		: 1.0f;
-	FootSpeedCmS = RootSpeed * LocomotionPlayRate;
+	LocomotionPlayRate = 1.0f;
+	StrideScale = 1.0f;
+	if (RootSpeed > 30.0f && AgentSpeed > 30.0f)
+	{
+		const float Ratio = AgentSpeed / RootSpeed;
+		const float MinRate = AnimSet->MotionMatchingMinPlayRate;
+		const float MaxRate = FMath::Max(AnimSet->MotionMatchingMaxPlayRate, MinRate);
+		LocomotionPlayRate = FMath::Clamp(AnimSet->bStrideWarping ? FMath::Sqrt(Ratio) : Ratio, MinRate, MaxRate);
+		if (AnimSet->bStrideWarping)
+		{
+			StrideScale = FMath::Clamp(Ratio / LocomotionPlayRate, AnimSet->MinStrideScale, FMath::Max(AnimSet->MaxStrideScale, AnimSet->MinStrideScale));
+		}
+	}
+	FootSpeedCmS = RootSpeed * LocomotionPlayRate * StrideScale;
+
+	// Distance matching for stops: play the stop clip so that the distance its root
+	// still travels equals the distance Mass has left to the goal, so the feet come to
+	// rest where the body does instead of the lock having to drag them there.
+	float CurrentAdvance = DeltaSeconds * LocomotionPlayRate;
+	if (State.Phase == EPhase::Stop && Comp->bMassStopsAtGoal && !Current.bLooping)
+	{
+		const TArray<float>& Distances = RootDistanceTable(Current.Sequence);
+		if (Distances.Num() > 2)
+		{
+			const float Total = Distances.Last();
+			const float SampleRate = 30.0f;
+			const auto DistanceAt = [&Distances, SampleRate](const float Time)
+			{
+				const float F = FMath::Clamp(Time * SampleRate, 0.0f, static_cast<float>(Distances.Num() - 1));
+				const int32 I = FMath::Min(FMath::FloorToInt(F), Distances.Num() - 2);
+				return FMath::Lerp(Distances[I], Distances[I + 1], F - I);
+			};
+			const float ClipLeft = Total - DistanceAt(Current.Time);
+			const float ToGoal = Comp->MassDistanceToStop;
+			if (ClipLeft > 1.0f && ToGoal < ClipLeft + 50.0f)
+			{
+				// The time at which the clip has ToGoal left to travel.
+				int32 Index = 0;
+				while (Index < Distances.Num() - 1 && Total - Distances[Index + 1] > ToGoal)
+				{
+					++Index;
+				}
+				const float TargetTime = (Index + 1) / SampleRate;
+				CurrentAdvance = FMath::Clamp(TargetTime - Current.Time, DeltaSeconds * 0.3f, DeltaSeconds * 1.6f);
+				StrideScale = 1.0f;
+			}
+		}
+	}
 	for (FRammsCrowdMotionMatching::FLayer& Layer : State.Layers)
 	{
 		const float Length = Layer.Sequence->GetPlayLength();
-		Layer.Time += DeltaSeconds * LocomotionPlayRate;
+		Layer.Time += &Layer == &Current ? CurrentAdvance : DeltaSeconds * LocomotionPlayRate;
 		Layer.Time = Layer.bLooping ? FMath::Fmod(Layer.Time, FMath::Max(Length, 0.01f)) : FMath::Min(Layer.Time, Length);
 		Frame.Locomotion.Add({ Layer.Sequence, Layer.Time, Layer.Weight });
 	}
@@ -831,6 +927,7 @@ void URammsCrowdAnimInstance::NativeUpdateAnimation(const float DeltaSeconds)
 	}
 
 	Frame = FRammsCrowdAnimFrame();
+	StrideScale = 1.0f;
 	const bool bMotionMatched = UpdateMotionMatching(DeltaSeconds);
 	if (!bMotionMatched)
 	{
@@ -851,6 +948,8 @@ void URammsCrowdAnimInstance::NativeUpdateAnimation(const float DeltaSeconds)
 	}
 
 	Frame.bLockFeet = AnimSet->bLockPlantedFeet;
+	Frame.StrideScale = LocomotionAlpha > 0.0f ? FMath::Lerp(1.0f, StrideScale, LocomotionAlpha) : 1.0f;
+	Frame.AgentVelocity = Comp->MassVelocity;
 	Frame.bResetFootLocks = bPendingFootReset;
 	bPendingFootReset = false;
 
@@ -903,7 +1002,11 @@ void URammsCrowdAnimInstance::UpdateLocomotion(const float DeltaSeconds, const f
 	}
 	// The rate that puts the feet on the ground at the agent's speed: no sliding.
 	LocomotionPlayRate = FMath::Clamp(Speed / FMath::Max(ClipSpeed, 1.0f), AnimSet->MinPlayRate, FMath::Max(AnimSet->MaxPlayRate, AnimSet->MinPlayRate));
-	FootSpeedCmS = LocomotionAlpha > 0.0f ? ClipSpeed * LocomotionPlayRate : 0.0f;
+	// Whatever the rate range can't cover goes into the step length.
+	StrideScale = AnimSet->bStrideWarping && ClipSpeed > 1.0f && Speed > 30.0f
+		? FMath::Clamp(Speed / (ClipSpeed * LocomotionPlayRate), AnimSet->MinStrideScale, FMath::Max(AnimSet->MaxStrideScale, AnimSet->MinStrideScale))
+		: 1.0f;
+	FootSpeedCmS = LocomotionAlpha > 0.0f ? ClipSpeed * LocomotionPlayRate * StrideScale : 0.0f;
 
 	if (LocomotionAlpha > 0.0f)
 	{
@@ -1034,10 +1137,46 @@ void FRammsCrowdAnimProxy::PreUpdate(UAnimInstance* InAnimInstance, const float 
 		Instance->LockedFeet = LockedFeet;
 		Instance->FootLockCorrectionCm = FootLockCorrection;
 		Instance->FootLockOverstretches = FootLockOverstretches;
+		Instance->FootContactFromCurves = FootContactFromCurves;
 	}
 }
 
-void FRammsCrowdAnimProxy::LockFeet(FCompactPose& Pose)
+namespace
+{
+	const TCHAR* const LegChains[2][4] = {
+		{ TEXT("thigh_l"), TEXT("calf_l"), TEXT("foot_l"), TEXT("ball_l") },
+		{ TEXT("thigh_r"), TEXT("calf_r"), TEXT("foot_r"), TEXT("ball_r") },
+	};
+
+	FCompactPoseBoneIndex FindBone(const FBoneContainer& Bones, const TCHAR* Name)
+	{
+		const int32 MeshIndex = Bones.GetPoseBoneIndexForBoneName(FName(Name));
+		return MeshIndex == INDEX_NONE ? FCompactPoseBoneIndex(INDEX_NONE) : Bones.MakeCompactPoseIndex(FMeshPoseBoneIndex(MeshIndex));
+	}
+
+	/** Moves a leg's foot (keeping its rotation) with two-bone IK, the knee bending the way it already does. */
+	void PlaceFoot(FCSPose<FCompactPose>& ComponentPose, const FCompactPoseBoneIndex Thigh, const FCompactPoseBoneIndex Calf, const FCompactPoseBoneIndex Foot, const FVector& Target)
+	{
+		FTransform ThighT = ComponentPose.GetComponentSpaceTransform(Thigh);
+		FTransform CalfT = ComponentPose.GetComponentSpaceTransform(Calf);
+		FTransform FootT = ComponentPose.GetComponentSpaceTransform(Foot);
+		const FVector Mid = (ThighT.GetLocation() + FootT.GetLocation()) * 0.5;
+		FVector Bend = CalfT.GetLocation() - Mid;
+		if (Bend.SizeSquared() < 1.0)
+		{
+			Bend = FVector::YAxisVector;
+		}
+		const FVector Pole = CalfT.GetLocation() + Bend.GetSafeNormal() * 50.0;
+		URammsSeatedPoseAnimInstance::SolveLimb(ThighT, CalfT, FootT, Target, Pole, /*bKeepEndRotation*/ true);
+		TArray<FBoneTransform, TInlineAllocator<3>> Changed;
+		Changed.Add(FBoneTransform(Thigh, ThighT));
+		Changed.Add(FBoneTransform(Calf, CalfT));
+		Changed.Add(FBoneTransform(Foot, FootT));
+		ComponentPose.SafeSetCSBoneTransforms(Changed);
+	}
+}
+
+void FRammsCrowdAnimProxy::AdjustFeet(FCompactPose& Pose, const FBlendedCurve& Curve)
 {
 	if (Frame.bResetFootLocks)
 	{
@@ -1045,91 +1184,162 @@ void FRammsCrowdAnimProxy::LockFeet(FCompactPose& Pose)
 	}
 	const URammsCrowdAnimInstance* Instance = Cast<URammsCrowdAnimInstance>(GetAnimInstanceObject());
 	const URammsCrowdAnimSet* Set = Instance != nullptr ? Instance->AnimSet.Get() : nullptr;
-	if (Set == nullptr)
+	const FBoneContainer& Bones = Pose.GetBoneContainer();
+	const FCompactPoseBoneIndex Pelvis = FindBone(Bones, TEXT("pelvis"));
+	if (Set == nullptr || Pelvis == INDEX_NONE)
 	{
 		return;
 	}
-	const FBoneContainer& Bones = Pose.GetBoneContainer();
-	auto Find = [&Bones](const TCHAR* Name)
+	FCompactPoseBoneIndex Legs[2][4];
+	for (int32 Side = 0; Side < 2; ++Side)
 	{
-		const int32 MeshIndex = Bones.GetPoseBoneIndexForBoneName(FName(Name));
-		return MeshIndex == INDEX_NONE ? FCompactPoseBoneIndex(INDEX_NONE) : Bones.MakeCompactPoseIndex(FMeshPoseBoneIndex(MeshIndex));
-	};
-	static const TCHAR* Chains[2][4] = {
-		{ TEXT("thigh_l"), TEXT("calf_l"), TEXT("foot_l"), TEXT("ball_l") },
-		{ TEXT("thigh_r"), TEXT("calf_r"), TEXT("foot_r"), TEXT("ball_r") },
-	};
+		for (int32 Joint = 0; Joint < 4; ++Joint)
+		{
+			Legs[Side][Joint] = FindBone(Bones, LegChains[Side][Joint]);
+			if (Legs[Side][Joint] == INDEX_NONE)
+			{
+				FootLocks[0] = FootLocks[1] = FFootLock();
+				return;
+			}
+		}
+	}
 	const float DeltaSeconds = FMath::Max(GetDeltaSeconds(), UE_KINDA_SMALL_NUMBER);
 	const FTransform& ComponentToWorld = GetComponentTransform();
-	const float PlantHeight = Set->FootPlantHeightCm;
-	const float FootStepSeconds = FMath::Max(Set->FootStepSeconds, 0.05f);
-	const float FootStepHeightCm = Set->FootStepHeightCm;
-	const float ReleaseHeight = PlantHeight + 4.0f;
+
+	// Flat-foot heights from the reference pose (component space), once per mesh.
+	if (Frame.bResetFootLocks || RefAnkleHeight <= 0.0f)
+	{
+		FCompactPose RefPose;
+		RefPose.SetBoneContainer(&Bones);
+		RefPose.ResetToRefPose();
+		FCSPose<FCompactPose> RefComponentPose;
+		RefComponentPose.InitPose(RefPose);
+		RefAnkleHeight = static_cast<float>(RefComponentPose.GetComponentSpaceTransform(Legs[0][2]).GetLocation().Z);
+		RefBallHeight = static_cast<float>(RefComponentPose.GetComponentSpaceTransform(Legs[0][3]).GetLocation().Z);
+	}
 
 	FCSPose<FCompactPose> ComponentPose;
 	ComponentPose.InitPose(Pose);
-	TArray<FBoneTransform, TInlineAllocator<6>> Changed;
+
+	// Stride warping: lengthen or shorten the steps along the direction of travel so
+	// the feet keep pace with the body without playing the clip faster or slower.
+	const float Stride = Frame.StrideScale;
+	if (FMath::Abs(Stride - 1.0f) > 0.01f && Frame.AgentVelocity.SizeSquared2D() > 400.0)
+	{
+		const FVector Direction = ComponentToWorld.InverseTransformVectorNoScale(Frame.AgentVelocity).GetSafeNormal2D();
+		const FVector Hips = ComponentPose.GetComponentSpaceTransform(Pelvis).GetLocation();
+		for (int32 Side = 0; Side < 2; ++Side)
+		{
+			const FVector FootAt = ComponentPose.GetComponentSpaceTransform(Legs[Side][2]).GetLocation();
+			const double Along = FVector::DotProduct(FootAt - Hips, Direction);
+			PlaceFoot(ComponentPose, Legs[Side][0], Legs[Side][1], Legs[Side][2], FootAt + Direction * (Along * (Stride - 1.0f)));
+		}
+	}
+
+	if (!Frame.bLockFeet)
+	{
+		FootLocks[0] = FootLocks[1] = FFootLock();
+		LockedFeet = 0;
+		FootLockCorrection = 0.0f;
+		FCSPose<FCompactPose>::ConvertComponentPosesToLocalPosesSafe(ComponentPose, Pose);
+		return;
+	}
+
+	// Foot contact: from the clips' authored contact curves when they have them
+	// (GASP: heel strike to toe-off), else from foot heights.
+	static const FName ContactCurves[2] = { FName(TEXT("contact_l")), FName(TEXT("contact_r")) };
+	const float FootStepSeconds = FMath::Max(Set->FootStepSeconds, 0.05f);
 	int32 NumLocked = 0;
 	FootLockCorrection = 0.0f;
+	FootContactFromCurves = 0;
 	for (int32 Side = 0; Side < 2; ++Side)
 	{
-		const FCompactPoseBoneIndex Thigh = Find(Chains[Side][0]);
-		const FCompactPoseBoneIndex Calf = Find(Chains[Side][1]);
-		const FCompactPoseBoneIndex Foot = Find(Chains[Side][2]);
-		const FCompactPoseBoneIndex Ball = Find(Chains[Side][3]);
+		const FCompactPoseBoneIndex Foot = Legs[Side][2];
+		const FCompactPoseBoneIndex Ball = Legs[Side][3];
 		FFootLock& Lock = FootLocks[Side];
-		if (Thigh == INDEX_NONE || Calf == INDEX_NONE || Foot == INDEX_NONE || Ball == INDEX_NONE)
-		{
-			Lock = FFootLock();
-			continue;
-		}
-		const FVector BallCS = ComponentPose.GetComponentSpaceTransform(Ball).GetLocation();
-		const FVector BallWorld = ComponentToWorld.TransformPosition(BallCS);
-
-		const bool bAnimPlanted = BallCS.Z < PlantHeight;
 		const FFootLock& Other = FootLocks[1 - Side];
+		const FTransform FootT = ComponentPose.GetComponentSpaceTransform(Foot);
+		const FVector AnkleCS = FootT.GetLocation();
+		const FVector BallCS = ComponentPose.GetComponentSpaceTransform(Ball).GetLocation();
+		const bool bBallDown = BallCS.Z < RefBallHeight + 2.5f;
+
+		bool bHasCurve = false;
+		const float CurveValue = Curve.Get(ContactCurves[Side], bHasCurve, 0.0f);
+		bool bContact;
+		if (bHasCurve)
+		{
+			bContact = CurveValue >= 0.5f;
+			++FootContactFromCurves;
+		}
+		else if (Lock.bLocked)
+		{
+			// Stay down until the toe lifts.
+			bContact = BallCS.Z < Set->FootPlantHeightCm + 4.0f && AnkleCS.Z < RefAnkleHeight + 15.0f;
+		}
+		else
+		{
+			// Heel strike (ankle low), or the ball down with the heel near the ground.
+			// The ankle check keeps a toe dipping mid-swing from counting.
+			bContact = AnkleCS.Z < RefAnkleHeight + 3.5f || (BallCS.Z < Set->FootPlantHeightCm && AnkleCS.Z < RefAnkleHeight + 6.0f);
+		}
+
 		float Lift = 0.0f;
 		if (Lock.StepTime >= 0.0f)
 		{
-			// A procedural step: the foot lifts and swings from where it was pinned back
-			// under the body, then plants again if the clip still has it down.
+			// A procedural step back under the body (see below).
 			Lock.StepTime += DeltaSeconds / FootStepSeconds;
 			const float T = FMath::Min(Lock.StepTime, 1.0f);
 			Lock.Offset = Lock.StepFrom * (1.0f - FMath::SmoothStep(0.0f, 1.0f, T));
 			Lock.Alpha = 1.0f;
-			Lift = FMath::Sin(T * UE_PI) * FootStepHeightCm;
+			Lift = FMath::Sin(T * UE_PI) * Set->FootStepHeightCm;
 			if (Lock.StepTime >= 1.0f)
 			{
 				Lock.StepTime = -1.0f;
 				Lock.Offset = FVector::ZeroVector;
-				Lock.bLocked = bAnimPlanted;
-				Lock.LockedWorld = BallWorld;
+				Lock.Alpha = 0.0f;
+				Lock.bLocked = false;
 			}
 		}
-		else
+		if (Lock.StepTime < 0.0f)
 		{
-			// The clip plants the foot when the ball is down; lift-off releases it.
-			if (!Lock.bLocked && bAnimPlanted)
+			const FVector Applied = Lock.Offset * (Lock.bLocked ? 1.0f : FMath::SmoothStep(0.0f, 1.0f, Lock.Alpha));
+			if (!Lock.bLocked && bContact)
 			{
+				// Touch-down. Pin the point the foot lands on: the heel at heel strike
+				// (the foot then rolls about it), the ball if it is already down. Start
+				// from where the (still correcting) foot is, so nothing jumps.
 				Lock.bLocked = true;
-				// Touch down where the corrected foot currently is, so a foot still fading
-				// out of a previous lock doesn't jump.
-				Lock.LockedWorld = BallWorld + ComponentToWorld.TransformVector(Lock.Offset * Lock.Alpha);
+				Lock.bPinBall = bBallDown;
+				const FVector PinCS = Lock.bPinBall ? BallCS : FVector(AnkleCS.X, AnkleCS.Y, 0.0);
+				Lock.PinLocal = FootT.InverseTransformPosition(PinCS);
+				Lock.LockedWorld = ComponentToWorld.TransformPosition(PinCS + Applied);
+				Lock.Offset = Applied;
+				Lock.Alpha = 1.0f;
 			}
-			else if (Lock.bLocked && BallCS.Z > ReleaseHeight)
+			else if (Lock.bLocked && !bContact)
 			{
+				// Toe-off: the foot follows the clip again, easing in over the swing.
 				Lock.bLocked = false;
 			}
 			if (Lock.bLocked)
 			{
-				FVector Correction = Lock.LockedWorld - BallWorld;
+				if (!Lock.bPinBall && bBallDown)
+				{
+					// The foot has rolled flat: from here it pivots about the ball (and
+					// at toe-off about the ball still). Re-pin at the ball where it is now.
+					Lock.bPinBall = true;
+					Lock.PinLocal = FootT.InverseTransformPosition(BallCS);
+					Lock.LockedWorld = ComponentToWorld.TransformPosition(BallCS + Lock.Offset);
+				}
+				const FVector PinWorld = ComponentToWorld.TransformPosition(FootT.TransformPosition(Lock.PinLocal));
+				FVector Correction = Lock.LockedWorld - PinWorld;
 				Correction.Z = 0.0;
 				Lock.Offset = ComponentToWorld.InverseTransformVector(Correction);
+				Lock.Offset.Z = 0.0;
 				const float Distance = static_cast<float>(Correction.Size());
 				// The body has drifted too far from a planted foot (a standing pedestrian
-				// pushed aside, a walk slower or faster than the clip): take a step rather
-				// than stretch the leg or slide the foot. One foot at a time unless badly
-				// overstretched.
+				// pushed aside): take a step rather than stretch the leg or slide the foot.
+				// One foot at a time unless badly overstretched.
 				if (Distance > Set->FootLockMaxDistanceCm && (Other.StepTime < 0.0f || Distance > 1.6f * Set->FootLockMaxDistanceCm))
 				{
 					Lock.bLocked = false;
@@ -1139,42 +1349,25 @@ void FRammsCrowdAnimProxy::LockFeet(FCompactPose& Pose)
 					++FootLockOverstretches;
 				}
 			}
-			if (Lock.StepTime < 0.0f)
+			else if (Lock.StepTime < 0.0f && Lock.Alpha > 0.0f)
 			{
-				// Ease in fast at touch-down, out over the swing.
-				const float Target = Lock.bLocked ? 1.0f : 0.0f;
-				const float Rate = DeltaSeconds / (Lock.bLocked ? 0.05f : 0.15f);
-				Lock.Alpha = Lock.Alpha < Target ? FMath::Min(Target, Lock.Alpha + Rate) : FMath::Max(Target, Lock.Alpha - Rate);
+				// In the swing: hand the foot back to the clip smoothly.
+				Lock.Alpha = FMath::Max(0.0f, Lock.Alpha - DeltaSeconds / 0.25f);
 			}
 		}
 		if (Lock.bLocked)
 		{
 			++NumLocked;
 		}
-		const FVector Offset = Lock.Offset * Lock.Alpha + FVector(0.0, 0.0, Lift);
-		FootLockCorrection = FMath::Max(FootLockCorrection, static_cast<float>((Lock.Offset * Lock.Alpha).Size()));
+
+		const float Weight = Lock.bLocked || Lock.StepTime >= 0.0f ? 1.0f : FMath::SmoothStep(0.0f, 1.0f, Lock.Alpha);
+		const FVector Offset = Lock.Offset * Weight + FVector(0.0, 0.0, Lift);
+		FootLockCorrection = FMath::Max(FootLockCorrection, static_cast<float>((Lock.Offset * Weight).Size()));
 		if (Offset.SizeSquared() < 0.01)
 		{
 			continue;
 		}
-
-		FTransform ThighT = ComponentPose.GetComponentSpaceTransform(Thigh);
-		FTransform CalfT = ComponentPose.GetComponentSpaceTransform(Calf);
-		FTransform FootT = ComponentPose.GetComponentSpaceTransform(Foot);
-		// Knee keeps bending the way it does in the clip (forward, +Y for these meshes).
-		const FVector Mid = (ThighT.GetLocation() + FootT.GetLocation()) * 0.5;
-		FVector Bend = CalfT.GetLocation() - Mid;
-		if (Bend.SizeSquared() < 1.0)
-		{
-			Bend = FVector::YAxisVector;
-		}
-		const FVector Pole = CalfT.GetLocation() + Bend.GetSafeNormal() * 50.0;
-		URammsSeatedPoseAnimInstance::SolveLimb(ThighT, CalfT, FootT, FootT.GetLocation() + Offset, Pole, /*bKeepEndRotation*/ true);
-		Changed.Reset();
-		Changed.Add(FBoneTransform(Thigh, ThighT));
-		Changed.Add(FBoneTransform(Calf, CalfT));
-		Changed.Add(FBoneTransform(Foot, FootT));
-		ComponentPose.SafeSetCSBoneTransforms(Changed);
+		PlaceFoot(ComponentPose, Legs[Side][0], Legs[Side][1], Foot, AnkleCS + Offset);
 	}
 	LockedFeet = NumLocked;
 	FCSPose<FCompactPose>::ConvertComponentPosesToLocalPosesSafe(ComponentPose, Pose);
@@ -1244,14 +1437,7 @@ bool FRammsCrowdAnimProxy::Evaluate(FPoseContext& Output)
 		);
 	}
 
-	if (Frame.bLockFeet)
-	{
-		LockFeet(Output.Pose);
-	}
-	else
-	{
-		FootLocks[0] = FootLocks[1] = FFootLock();
-	}
+	AdjustFeet(Output.Pose, Output.Curve);
 
 	FBoneWeights Weights;
 	FBoneWeights Mask;

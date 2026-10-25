@@ -176,9 +176,25 @@ public:
 	float MaxPlayRate = 1.6f;
 
 	/**
+	 * Stride warping: when the agent walks faster or slower than the clip, cover part
+	 * of the difference by lengthening or shortening the steps along the direction of
+	 * travel (legs re-solved with IK) instead of only changing playback speed.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Ramms|Crowd|Locomotion")
+	bool bStrideWarping = true;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Ramms|Crowd|Locomotion", meta = (ClampMin = "0.5", ClampMax = "1.0"))
+	float MinStrideScale = 0.8f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Ramms|Crowd|Locomotion", meta = (ClampMin = "1.0", ClampMax = "1.6"))
+	float MaxStrideScale = 1.25f;
+
+	/**
 	 * Foot locking: when the animation plants a foot, keep it where it touched down in
 	 * the world and bend the leg (two-bone IK) to reach it until the clip lifts the
-	 * foot again. Removes the sliding left when Mass moves the body at a different
+	 * foot again. The pinned point rolls heel to ball like a real step. Contact comes
+	 * from the clips' contact_l / contact_r curves when they have them (GASP clips
+	 * do), else from foot heights. Removes the sliding left when Mass moves the body at a different
 	 * speed or direction than the clip's feet (most noticeable in motion-matched
 	 * starts, stops and turns).
 	 */

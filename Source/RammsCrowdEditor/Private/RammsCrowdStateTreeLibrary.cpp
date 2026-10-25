@@ -19,6 +19,7 @@
 #include "Tasks/MassZoneGraphFindWanderTarget.h"
 #include "Tasks/MassZoneGraphPathFollowTask.h"
 #include "Tasks/MassZoneGraphStandTask.h"
+#include "RammsStandAtPathEndTask.h"
 #include "UObject/Package.h"
 
 UStateTree* URammsCrowdStateTreeLibrary::CreatePedestrianWanderStateTree(const FString& PackagePath, const FString& AssetName)
@@ -64,10 +65,14 @@ UStateTree* URammsCrowdStateTreeLibrary::CreatePedestrianWanderStateTree(const F
 
 	// --- Wander: pick a lane target and follow it ---
 	// Task order matters: the wander target must be computed before path follow reads it.
+	// The walk ends in Stand (next state), so mark the path that way: Mass then
+	// brakes into the goal instead of overshooting it and creeping back.
 	const FStateTreeEditorNode& FindWanderNode = Wander.AddTask<FMassZoneGraphFindWanderTarget>();
+	const FStateTreeEditorNode& StandAtEndNode = Wander.AddTask<FRammsStandAtPathEndTask>();
 	const FStateTreeEditorNode& PathFollowNode = Wander.AddTask<FMassZoneGraphPathFollowTask>();
 
-	const bool bBound = EditorData->AddPropertyBinding(FindWanderNode, TEXT("WanderTargetLocation"), PathFollowNode, TEXT("TargetLocation"));
+	const bool bBound = EditorData->AddPropertyBinding(FindWanderNode, TEXT("WanderTargetLocation"), StandAtEndNode, TEXT("TargetLocation"))
+		&& EditorData->AddPropertyBinding(FindWanderNode, TEXT("WanderTargetLocation"), PathFollowNode, TEXT("TargetLocation"));
 	if (!bBound)
 	{
 		UE_LOG(LogRammsCrowdEditor, Error, TEXT("CreatePedestrianWanderStateTree: failed to bind WanderTargetLocation -> TargetLocation"));

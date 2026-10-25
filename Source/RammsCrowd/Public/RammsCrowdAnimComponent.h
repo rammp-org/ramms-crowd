@@ -57,6 +57,15 @@ public:
 	UPROPERTY(BlueprintReadOnly, Category = "Ramms|Crowd")
 	bool bMassStopsAtGoal = false;
 
+	/**
+	 * How far the pedestrian itself still travels before it stands, cm (large when it
+	 * isn't stopping). Mass's DistanceToGoal is measured from its steering target,
+	 * which runs ahead of the agent; this is from the agent, and includes the final
+	 * approach Mass makes after the target has arrived.
+	 */
+	UPROPERTY(BlueprintReadOnly, Category = "Ramms|Crowd")
+	float MassDistanceToStop = 1.0e6f;
+
 	/** 2D speed, cm/s — feed the walk blendspace with this. */
 	UPROPERTY(BlueprintReadOnly, Category = "Ramms|Crowd")
 	float MassSpeed = 0.0f;

@@ -80,6 +80,9 @@ struct FRammsCrowdAnimFrame
 	/** Pin planted feet in the world (see URammsCrowdAnimSet::bLockPlantedFeet); reset when the actor becomes someone else. */
 	bool bLockFeet = false;
 	bool bResetFootLocks = false;
+	/** Stride warping: step length scale along the agent's velocity (world, cm/s). */
+	float StrideScale = 1.0f;
+	FVector AgentVelocity = FVector::ZeroVector;
 };
 
 /**
@@ -161,6 +164,14 @@ public:
 
 	UPROPERTY(BlueprintReadOnly, Category = "Ramms|Crowd")
 	int32 FootLockOverstretches = 0;
+
+	/** How many feet took their contact from the clip's contact curves last frame (0..2; else foot heights). */
+	UPROPERTY(BlueprintReadOnly, Category = "Ramms|Crowd")
+	int32 FootContactFromCurves = 0;
+
+	/** Step length scale applied last frame (stride warping; 1 = as captured). */
+	UPROPERTY(BlueprintReadOnly, Category = "Ramms|Crowd")
+	float StrideScale = 1.0f;
 
 	/** Plays a reaction now (ignores the cooldown). */
 	UFUNCTION(BlueprintCallable, Category = "Ramms|Crowd")
@@ -254,13 +265,20 @@ private:
 		/** 0..1 through a procedural step, or < 0 when not stepping. */
 		float StepTime = -1.0f;
 		FVector StepFrom = FVector::ZeroVector;
+		/** The pinned point on the foot (in the foot bone's space): the heel, then the ball. */
+		FVector PinLocal = FVector::ZeroVector;
+		bool bPinBall = false;
 	};
 
-	void LockFeet(FCompactPose& Pose);
+	/** Stride warping and foot locking, on the finished locomotion pose. */
+	void AdjustFeet(FCompactPose& Pose, const FBlendedCurve& Curve);
 
 	FRammsCrowdAnimFrame Frame;
 	FFootLock FootLocks[2];
 	int32 LockedFeet = 0;
 	float FootLockCorrection = 0.0f;
 	int32 FootLockOverstretches = 0;
+	int32 FootContactFromCurves = 0;
+	float RefAnkleHeight = 0.0f;
+	float RefBallHeight = 0.0f;
 };

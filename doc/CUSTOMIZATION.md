@@ -125,25 +125,46 @@ layer on top unchanged.
 
 ![Current blend vs motion matching with foot locking](images/crowd_foot_lock.webp)
 
-### Foot locking (`bLockPlantedFeet`)
+### Feet: stride warping and foot locking
 
 Mass moves the pedestrians, not the clips' root motion. Whenever the body's speed
 or direction differs from the clip's, a planted foot would slide. This shows most in
 motion-matched starts, stops and turns, and in standing pedestrians nudged by
-avoidance. Foot locking fixes it for both locomotion paths:
+avoidance. Three things keep the feet honest, on both locomotion paths:
 
-- When the clip puts a foot down (ball below `FootPlantHeightCm`), the foot is
-  pinned where it touched down in the world. The leg bends to reach it with
-  two-bone IK, and the knee keeps the direction it has in the clip. When the clip
-  lifts the foot, the lock eases out over the swing.
-- If the body drifts more than `FootLockMaxDistanceCm` from a pinned foot, that
-  foot takes a procedural step (`FootStepSeconds`, `FootStepHeightCm`) back under
-  the body instead of stretching the leg or sliding. Only one foot steps at a time
-  unless the leg is badly overstretched.
-- The motion-matching pose history records the clip's own feet, before locking,
-  because that is what the search compares against.
-- Debug values on the instance: `LockedFeet`, `FootLockCorrectionCm` and
-  `FootLockOverstretches` (the number of steps taken).
+- **Stride warping** (`bStrideWarping`, `MinStrideScale`..`MaxStrideScale`). The
+  difference between the agent's speed and the clip's is split: part is covered
+  by playback rate, the rest by lengthening or shortening the steps along the
+  direction of travel (legs re-solved with IK). Neither shows on its own.
+- **Foot locking with heel-to-toe roll** (`bLockPlantedFeet`).
+  - **Contact:** comes from the clips' `contact_l` / `contact_r` curves when they
+    have them (GASP clips do: heel strike to toe-off). Otherwise it comes from foot
+    heights; an ankle check keeps a toe dipping mid-swing from counting as a plant.
+  - **Roll:** at heel strike the heel is pinned where it lands and the foot rolls
+    about it. Once the ball is down the pin moves to the ball, which is also the
+    pivot at toe-off. The leg reaches the pinned foot with two-bone IK, and the knee
+    bends the way it does in the clip.
+  - **Release:** at toe-off the foot eases back to the clip over the swing.
+- **Corrective steps.** If the body drifts more than `FootLockMaxDistanceCm` from
+  a pinned foot, the foot takes a procedural step (`FootStepSeconds`,
+  `FootStepHeightCm`) back under the body instead of stretching or sliding. Only
+  one foot steps at a time unless the leg is badly overstretched.
+
+Motion matching adds two stop-specific pieces:
+
+- **Distance-matched stops.** A stop clip is played so that the distance its root
+  still travels equals the distance the agent has left to where it will stand
+  (`MassDistanceToStop`, measured from the agent rather than Mass's steering target,
+  which runs ahead of it).
+- **Play-out.** Once a start or stop clip is chosen it plays out rather than being
+  re-searched mid-transition. Re-searching would hop between left- and right-foot
+  variants and tangle the feet.
+
+The motion-matching pose history records the clip's own feet, before warping and
+locking, because that is what the search compares against.
+
+Debug values on the instance: `StrideScale`, `LockedFeet`, `FootLockCorrectionCm`,
+`FootLockOverstretches` (the number of steps taken) and `FootContactFromCurves`.
 
 ### Fallback animation (`URammsCrowdAnimComponent` without an anim set)
 
@@ -195,6 +216,7 @@ vocabulary to compose from:
 | `RAMMS Stimulus Zone` (`FRammsStimulusZoneCondition`) | condition | zone ≥ MinZone (invertible) |
 | `RAMMS Closing Speed` (`FRammsClosingSpeedCondition`) | condition | approach speed ≥ threshold |
 | `RAMMS Back Away` (`FRammsBackAwayTask`) | task | retreat along AwayDirection while facing the stimulus, lane-safe distances |
+| `RAMMS Stand At Path End` (`FRammsStandAtPathEndTask`) | task | marks a ZoneGraph path target (bind the wander target, between it and Path Follow) as ending in a stand. The engine's wander target ends paths with a Move intent, so Mass applies no arrival slowdown: agents hit the goal at full speed, overshoot and creep back. `ST_Pedestrian`'s Wander state uses it because Stand always follows |
 | engine: ZG Find Wander Target / Path Follow / Stand, LookAt, Find Escape Target, NavMesh tasks | tasks | locomotion + gaze building blocks |
 
 Recipes:
