@@ -122,7 +122,9 @@ startles (`bStartleOnlyWhenStimulusMoves`), startle cooldown, back-away distance
 speed scales. How agents pass the robot (planning lookahead, comfort gap, keep-right,
 slowdown) lives on the RAMMS Player Avatar trait in `DA_MassConfig_PlayerAvatar`.
 
-![Pedestrians streaming past a parked chair, curving around it early and slowing alongside](images/crowd_passing.webp) Edit between PIE runs; verify with
+![Pedestrians streaming past a parked chair, curving around it early and slowing alongside](images/crowd_passing.webp)
+
+![The chair driving through the crowd with and against the flow, forwards and in reverse](images/crowd_drive_grid.webp) Edit between PIE runs; verify with
 `ramms.crowd.DebugStimulus 1`.
 
 Walking speed/mix: Mass Movement trait (speed + variance), and the Stand duration in
