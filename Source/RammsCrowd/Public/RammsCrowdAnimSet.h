@@ -227,11 +227,12 @@ public:
 
 	/**
 	 * While walking, a locked foot gives way (slips a little) once it is this far from
-	 * where the clip has it, cm, rather than holding the leg until it straightens and
+	 * where the clip has it along the path (1.6 times that sideways), cm, rather than
+	 * holding the leg until it straightens and
 	 * then stepping: the clip's own stride is kept. Faded in between 30 and 80 cm/s.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Ramms|Crowd|Locomotion", meta = (ClampMin = "0.0"))
-	float WalkingFootLockMaxCm = 6.0f;
+	float WalkingFootLockMaxCm = 11.0f;
 
 	/**
 	 * Orientation warping (motion matching): when the body faces a different way

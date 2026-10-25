@@ -188,6 +188,13 @@ public:
 	UPROPERTY(BlueprintReadOnly, Category = "Ramms|Crowd")
 	float OrientationWarpDegrees = 0.0f;
 
+	/** Debug: each foot's lock correction before any slip (world, cm; Z = 1 while locked). */
+	UPROPERTY(BlueprintReadOnly, Category = "Ramms|Crowd")
+	FVector FootLockDriftL = FVector::ZeroVector;
+
+	UPROPERTY(BlueprintReadOnly, Category = "Ramms|Crowd")
+	FVector FootLockDriftR = FVector::ZeroVector;
+
 	/** Motion matching is playing a start or stop clip (game thread). */
 	bool bMotionTransitionClip = false;
 
@@ -321,6 +328,7 @@ private:
 	int32 FootLockBits = 0;
 	/** Orientation warp applied to the lower body, degrees (eased). */
 	float OrientationWarp = 0.0f;
+	FVector FootLockDrift[2] = { FVector::ZeroVector, FVector::ZeroVector };
 
 	/** Last clear knee bend direction per leg (component space), so a nearly straight leg keeps a stable pole. */
 	FVector KneeBend[2] = { FVector::ZeroVector, FVector::ZeroVector };

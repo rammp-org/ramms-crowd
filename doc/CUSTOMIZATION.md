@@ -91,7 +91,7 @@ the clips' "L" sync markers (gait phase; a clip without them counts as one cycle
 `IdleName`, `CarryName`) and its `LocomotionPlayRate`, `FootSpeedCmS` and
 `ReactionCount` for debugging.
 
-### Motion matching (experimental)
+### Motion matching
 
 Instead of blending the per-body walk and directional clips, the anim instance can
 pick locomotion by motion matching (UE Pose Search) against the Game Animation
@@ -129,8 +129,12 @@ layer on top unchanged.
   set changes or a one-shot clip runs out. New clips cross-fade over
   `MotionMatchingBlendSeconds`. Playback is scaled toward the agent's speed
   within `MotionMatchingMinPlayRate`..`MotionMatchingMaxPlayRate`.
-- **Status**: off unless the sets are filled (`bUseMotionMatching` switches it
-  off without clearing them). Debug values on the instance: `bMotionMatching`,
+- **Status**: on wherever the sets are filled; `bUseMotionMatching` switches it
+  off without clearing them. In RAMMS-Sim the generated content is committed
+  (`Content/CrowdMM/AnimsFK` and `DatabasesFK`, about 84 MB; they depend only on
+  the City Sample crowd from Fab) and `DA_CrowdAnimSet` has it on. Pose Search
+  builds the database indexes into the derived data cache on first load, which
+  takes a little while once per machine. Debug values on the instance: `bMotionMatching`,
   `MotionPhase`, `MotionMatchedClip` and `MotionMatchSwitches`. Next steps: a
   mirror table for the crowd skeleton and limiting it to nearby agents.
 
@@ -170,10 +174,15 @@ avoidance. Three things keep the feet honest, on both locomotion paths:
     bends the way it does in the clip.
   - **Release:** at toe-off the foot eases back to the clip over the swing
     (`FootReleaseSeconds`), so the next step lands where the clip puts it.
-  - **Walking:** while walking, a planted foot only holds against small drift
-    (`WalkingFootLockMaxCm`, 6 cm) and then gives way by that much. Start and stop
-    clips plant their feet deliberately, so during them the feet hold firmly
-    (stepping if the body gets too far away). Holding on longer
+  - **Walking:** while walking, a planted foot holds against drift up to
+    `WalkingFootLockMaxCm` (11 cm) along the path and 1.6 times that sideways
+    (the path curving under a planted foot is easy for the legs to take), then
+    gives way by that much. A walking foot never takes a procedural step. Start
+    and stop clips plant their feet deliberately, so during them the feet hold
+    firmly (stepping if the body gets too far away).
+  - **Flat feet count as planted** even when the contact curve says otherwise:
+    the curves can start a little after the foot lands and end a little before it
+    lifts, and a flat foot that isn't held slides. Holding on longer
     stretched the leg straight and ended the stance with a procedural step in
     place of the clip's swing, which looked robotic.
 - **Corrective steps.** If the body drifts more than `FootLockMaxDistanceCm` from
@@ -200,7 +209,11 @@ Motion matching adds two stop-specific pieces:
   which runs ahead of it).
 - **Play-out.** Once a start or stop clip is chosen it plays out rather than being
   re-searched mid-transition. Re-searching would hop between left- and right-foot
-  variants and tangle the feet.
+  variants and tangle the feet. What follows is matched early enough that the
+  cross-fade finishes before the clip runs out: a clip that has ended freezes,
+  and a frozen planted foot slides along with the body. Within the walk loop,
+  a match to another moment of the same loop is ignored (it would only cross-fade
+  between two step phases).
 
 The motion-matching pose history records the clip's own feet, before warping and
 locking, because that is what the search compares against.

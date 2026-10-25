@@ -271,6 +271,8 @@ struct FRammsCrowdMotionMatching
 		float Time = 0.0f;
 		float Weight = 0.0f;
 		bool bLooping = false;
+		/** How long this layer takes to fade in (shorter when the clip it replaces is running out). */
+		float BlendSeconds = 0.25f;
 	};
 
 	struct FPastSample
@@ -559,7 +561,7 @@ bool URammsCrowdAnimInstance::UpdateMotionMatching(const float DeltaSeconds)
 	}
 	// A clip that doesn't loop is about to run out: pick what follows it.
 	const bool bClipEnding = !State.Layers.IsEmpty() && !State.Layers.Last().bLooping
-		&& State.Layers.Last().Time >= State.Layers.Last().Sequence->GetPlayLength() - 0.15f;
+		&& State.Layers.Last().Time >= State.Layers.Last().Sequence->GetPlayLength() - FMath::Max(0.15f, AnimSet->MotionMatchingBlendSeconds);
 
 	// Search now and then (and as soon as the pose history has a pose in it).
 	State.SinceSearch += DeltaSeconds;
@@ -583,14 +585,27 @@ bool URammsCrowdAnimInstance::UpdateMotionMatching(const float DeltaSeconds)
 			const UAnimSequence* Sequence = Cast<UAnimSequence>(Result.GetCurrentResultAnimationAsset());
 			const float Time = Result.GetAssetTime();
 			const bool bSameSpot = !State.Layers.IsEmpty() && State.Layers.Last().Sequence == Sequence && FMath::Abs(State.Layers.Last().Time - Time) < 0.2f;
-			if (Sequence != nullptr && !bSameSpot)
+			// Jumping to another moment of the walk loop already playing only re-times the
+			// steps, and the cross-fade between two step phases slides the planted feet:
+			// let the loop run on.
+			const bool bSameLoop = State.Phase == EPhase::Move && !State.Layers.IsEmpty() && State.Layers.Last().bLooping
+				&& State.Layers.Last().Sequence == Sequence;
+			if (Sequence != nullptr && !bSameSpot && !bSameLoop)
 			{
 				const UE::PoseSearch::FSearchIndexAsset* IndexAsset = Result.GetSearchIndexAsset();
 				if (State.Layers.Num() >= 4)
 				{
 					State.Layers.RemoveAt(0);
 				}
-				State.Layers.Add({ Sequence, Time, State.Layers.IsEmpty() ? 1.0f : 0.0f, IndexAsset != nullptr && IndexAsset->IsLooping() });
+				// A clip that has run out freezes, and a frozen planted foot slides along with
+				// the body: finish the fade before the clip it replaces ends.
+				float FadeSeconds = AnimSet->MotionMatchingBlendSeconds;
+				if (!State.Layers.IsEmpty() && !State.Layers.Last().bLooping)
+				{
+					const FRammsCrowdMotionMatching::FLayer& Previous = State.Layers.Last();
+					FadeSeconds = FMath::Min(FadeSeconds, FMath::Max(0.05f, (Previous.Sequence->GetPlayLength() - Previous.Time) / FMath::Max(LocomotionPlayRate, 0.1f)));
+				}
+				State.Layers.Add({ Sequence, Time, State.Layers.IsEmpty() ? 1.0f : 0.0f, IndexAsset != nullptr && IndexAsset->IsLooping(), FadeSeconds });
 				MotionMatchedClip = Sequence->GetFName();
 				++MotionMatchSwitches;
 				State.bPhaseClipChosen = true;
@@ -610,7 +625,7 @@ bool URammsCrowdAnimInstance::UpdateMotionMatching(const float DeltaSeconds)
 
 	// Crossfade: the newest clip fades in, the older ones share what's left.
 	FRammsCrowdMotionMatching::FLayer& Current = State.Layers.Last();
-	const float BlendSeconds = AnimSet->MotionMatchingBlendSeconds;
+	const float BlendSeconds = Current.BlendSeconds;
 	Current.Weight = BlendSeconds > UE_KINDA_SMALL_NUMBER ? FMath::Min(1.0f, Current.Weight + DeltaSeconds / BlendSeconds) : 1.0f;
 	float Others = 0.0f;
 	for (int32 Index = 0; Index < State.Layers.Num() - 1; ++Index)
@@ -696,7 +711,7 @@ bool URammsCrowdAnimInstance::UpdateMotionMatching(const float DeltaSeconds)
 			}
 		}
 	}
-	const float Ease = 1.0f - FMath::Exp(-DeltaSeconds / 0.2f);
+	const float Ease = 1.0f - FMath::Exp(-DeltaSeconds / 0.08f);
 	State.Stride += (WantStride - State.Stride) * Ease;
 	State.Lift += (WantLift - State.Lift) * Ease;
 	StrideScale = State.Stride;
@@ -1195,6 +1210,8 @@ void FRammsCrowdAnimProxy::PreUpdate(UAnimInstance* InAnimInstance, const float 
 		Instance->FootLockBits = FootLockBits;
 		Instance->FootDebug = FootDebug;
 		Instance->OrientationWarpDegrees = OrientationWarp;
+		Instance->FootLockDriftL = FootLockDrift[0];
+		Instance->FootLockDriftR = FootLockDrift[1];
 
 	}
 }
@@ -1401,6 +1418,7 @@ void FRammsCrowdAnimProxy::AdjustFeet(FCompactPose& Pose, const FBlendedCurve& C
 	const float FootStepSeconds = FMath::Max(Set->FootStepSeconds, 0.05f);
 	int32 NumLocked = 0;
 	FootLockCorrection = 0.0f;
+	FootLockDrift[0] = FootLockDrift[1] = FVector::ZeroVector;
 	FootContactFromCurves = 0;
 	for (int32 Side = 0; Side < 2 && Frame.bLockFeet; ++Side)
 	{
@@ -1416,7 +1434,10 @@ void FRammsCrowdAnimProxy::AdjustFeet(FCompactPose& Pose, const FBlendedCurve& C
 		bool bContact;
 		if (bHasCurve)
 		{
-			bContact = CurveValue >= 0.5f;
+			// Or the foot is flat on the ground: the curves can start a little after
+			// the foot lands and end a little before it lifts, and a flat foot that
+			// isn't held slides.
+			bContact = CurveValue >= 0.5f || (AnkleCS.Z < RefAnkleHeight + 3.0f && BallCS.Z < RefBallHeight + 2.5f);
 			++FootContactFromCurves;
 		}
 		else if (Lock.bLocked)
@@ -1487,26 +1508,36 @@ void FRammsCrowdAnimProxy::AdjustFeet(FCompactPose& Pose, const FBlendedCurve& C
 				Lock.Offset = ComponentToWorld.InverseTransformVector(Correction);
 				Lock.Offset.Z = 0.0;
 				float Distance = static_cast<float>(Correction.Size());
+				FootLockDrift[Side] = FVector(Correction.X, Correction.Y, 1.0);
 				// Walking: the clip's feet already land about where the body goes, so a
 				// planted foot only holds against small drift and then gives way, keeping
 				// the clip's leg motion instead of straightening the leg.
 				// Start and stop clips plant their feet deliberately: hold them (stepping if
 				// the body gets too far away) rather than slipping.
 				const float Walking = Frame.bFirmFootLock ? 0.0f : FMath::SmoothStep(30.0f, 80.0f, static_cast<float>(Frame.AgentVelocity.Size2D()));
-				// (Divided rather than interpolated from a huge number, which cancels to 0 in float.)
+				// The hold is an ellipse in the direction of travel: sideways drift (the path
+				// curving under a planted foot) is easy for the legs to take, drift along the
+				// path stretches or crowds them. (Divided rather than interpolated from a
+				// huge number, which cancels to 0 in float.)
 				const float Hold = Set->WalkingFootLockMaxCm / FMath::Max(Walking, 1.0e-3f);
-				if (Walking > 0.0f && Distance > Hold)
+				const FVector Along = Frame.AgentVelocity.GetSafeNormal2D();
+				const double AlongPart = Along.IsNearlyZero() ? Distance : FVector::DotProduct(Correction, Along);
+				const double SidePart = Along.IsNearlyZero() ? 0.0 : FVector::CrossProduct(Along, Correction).Z;
+				const double Stretch = FMath::Sqrt(FMath::Square(AlongPart) + FMath::Square(SidePart / 1.6)) / Hold;
+				if (Walking > 0.0f && Stretch > 1.0)
 				{
-					Correction *= Hold / Distance;
+					Correction /= Stretch;
 					Lock.LockedWorld = PinWorld + Correction;
 					Lock.Offset = ComponentToWorld.InverseTransformVector(Correction);
 					Lock.Offset.Z = 0.0;
-					Distance = Hold;
+					Distance = static_cast<float>(Correction.Size());
 				}
 				// The body has drifted too far from a planted foot (a standing pedestrian
 				// pushed aside): take a step rather than stretch the leg or slide the foot.
 				// One foot at a time unless badly overstretched.
-				if (Distance > Set->FootLockMaxDistanceCm && (Other.StepTime < 0.0f || Distance > 1.6f * Set->FootLockMaxDistanceCm))
+				// A walking foot never steps: it gives way above instead, so the clip's own
+				// swing is never replaced.
+				if (Walking < 0.5f && Distance > Set->FootLockMaxDistanceCm && (Other.StepTime < 0.0f || Distance > 1.6f * Set->FootLockMaxDistanceCm))
 				{
 					Lock.bLocked = false;
 					Lock.StepTime = 0.0f;
