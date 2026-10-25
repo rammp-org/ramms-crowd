@@ -220,18 +220,21 @@ the chair, whatever the occupant's build. All locations are in seat space
   two-bone IK per limb. `Location` is where the wrist/ankle goes, `PoleLocation`
   which way the elbow/knee points, `Weight` blends from the pose (0) to the
   target (1). `RelativeToBone` makes the target follow another bone — e.g. a hand
-  resting on the thigh uses `calf_r`. `EndRotation = KeepPose` keeps the hand/foot
+  resting in the lap uses `thigh_r` (the hip joint). `EndRotation = KeepPose` keeps the hand/foot
   orientation from the pose (feet flat on a footplate) instead of following the
   forearm/shin.
 - **`BodyAdjustments`**: per-build corrections keyed by a substring of the
   occupant mesh name (`_ovw`, `_unw`, …). `Pelvis` shifts the pelvis target;
   `OnBody` shifts targets that use `RelativeToBone` (a thin thigh is lower than
   a heavy one). City Sample builds share one joint layout but differ in flesh,
-  so this is what keeps a hand on the thigh rather than in it.
+  so this is what keeps a hand on the lap rather than in it.
 
 `BP_Mebot_Ramms` in RAMMS-Sim carries a worked fit for the MeBot: left hand on
-the joystick module, right hand on the right thigh (the robot arm owns the
-right armrest), feet on the front of the base (there are no footplates).
+the joystick module, right hand resting in the lap (the robot arm owns the
+right armrest), feet on the front of the base (there are no footplates). The
+right hand's relaxed finger curl is ordinary `PoseBoneOffsets` entries, taken
+from a frame of a City Sample idle (offset = reference⁻¹ × idle, per finger
+bone) rather than set by hand.
 
 ### Occupant motion (`Ramms|Seat|Motion`)
 
