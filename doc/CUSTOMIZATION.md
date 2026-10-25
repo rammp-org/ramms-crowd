@@ -135,25 +135,46 @@ avoidance. Three things keep the feet honest, on both locomotion paths:
 - **Stride warping** (`bStrideWarping`, `MinStrideScale`..`MaxStrideScale`). The
   difference between the agent's speed and the clip's is split: part is covered
   by playback rate, the rest by lengthening or shortening the steps along the
-  direction of travel (legs re-solved with IK). Neither shows on its own.
+  direction of travel. Neither shows on its own. Faster than the clip is mostly
+  quicker steps, as people walk: longer steps would straighten the knees. The
+  clip speed is the blend of all playing clips, and the scales are eased (0.2 s),
+  so a newly matched clip never changes the legs in one frame.
 - **Foot lift scaling** (`bScaleFootLift`, `MinFootLiftScale`). Clips captured at
   a brisk walk (GASP's is 165 cm/s) lift the toe and raise the heel far more than
   a slower walker would. Below the clip's speed, the foot's height above the
   ground and its heel-rise / toe-lift rotation are scaled toward a flat foot by the
-  speed ratio.
+  speed ratio. Toe lift at heel strike is scaled on the ground too, but heel rise
+  and height only once the foot is in the air: lowering the heel of a planted foot
+  would force the trailing leg straight. A swinging foot is never lowered beyond
+  the leg's reach as the clip has it.
 - **Foot locking with heel-to-toe roll** (`bLockPlantedFeet`).
   - **Contact:** comes from the clips' `contact_l` / `contact_r` curves when they
     have them (GASP clips do: heel strike to toe-off). Otherwise it comes from foot
     heights; an ankle check keeps a toe dipping mid-swing from counting as a plant.
-  - **Roll:** at heel strike the heel is pinned where it lands and the foot rolls
+  - **Roll:** at heel strike the heel (a fixed point of the foot, the sole under
+    the ankle in the bind pose) is pinned where it lands and the foot rolls
     about it. Once the ball is down the pin moves to the ball, which is also the
     pivot at toe-off. The leg reaches the pinned foot with two-bone IK, and the knee
     bends the way it does in the clip.
-  - **Release:** at toe-off the foot eases back to the clip over the swing.
+  - **Release:** at toe-off the foot eases back to the clip over the swing
+    (`FootReleaseSeconds`), so the next step lands where the clip puts it.
+  - **Walking:** while walking, a planted foot only holds against small drift
+    (`WalkingFootLockMaxCm`) and then gives way by that much. Holding on longer
+    stretched the leg straight and ended the stance with a procedural step in
+    place of the clip's swing, which looked robotic.
 - **Corrective steps.** If the body drifts more than `FootLockMaxDistanceCm` from
   a pinned foot, the foot takes a procedural step (`FootStepSeconds`,
   `FootStepHeightCm`) back under the body instead of stretching or sliding. Only
-  one foot steps at a time unless the leg is badly overstretched.
+  one foot steps at a time unless the leg is badly overstretched. These are for
+  standing and slow pedestrians; walking feet slip instead (above).
+- **Hips and knees.** Each leg is solved once, after every foot change, with a
+  two-bone IK that keeps the clip's knee direction (remembered while the leg is
+  nearly straight, where it would otherwise be noise). A pose the clip plays as
+  captured is left exactly as captured, straight knees included. If a foot ends up
+  beyond the leg's reach the hips dip (up to 5 cm, as a walker's do into a long
+  step) and the knee eases off full extension (soft IK) rather than snapping. If
+  shorter steps bring the planted feet closer, the hips rise (up to 3.5 cm) so the
+  knees keep the clip's bend instead of crouching.
 
 Motion matching adds two stop-specific pieces:
 
@@ -169,7 +190,10 @@ The motion-matching pose history records the clip's own feet, before warping and
 locking, because that is what the search compares against.
 
 Debug values on the instance: `StrideScale`, `FootLiftScale`, `LockedFeet`, `FootLockCorrectionCm`,
-`FootLockOverstretches` (the number of steps taken) and `FootContactFromCurves`.
+`FootLockOverstretches` (the number of steps taken), `FootContactFromCurves`,
+`PelvisDropCm` (negative when raised), `FootLockBits` (per foot: locked, stepping,
+pinned at the ball) and `FootDebug` (left knee angle in the clip and after
+adjustment, and the clip's hip-to-ankle distance over the leg's reach).
 
 ### Fallback animation (`URammsCrowdAnimComponent` without an anim set)
 

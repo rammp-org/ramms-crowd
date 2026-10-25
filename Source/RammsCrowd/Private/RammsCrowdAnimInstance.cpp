@@ -299,6 +299,9 @@ struct FRammsCrowdMotionMatching
 	float SinceSearch = UE_BIG_NUMBER;
 	double Clock = 0.0;
 	TArray<FPastSample> Past;
+	/** Stride and foot-lift scales, eased so a clip switch never changes the legs in one frame. */
+	float Stride = 1.0f;
+	float Lift = 1.0f;
 
 	FRammsCrowdMotionMatching()
 	{
@@ -309,6 +312,8 @@ struct FRammsCrowdMotionMatching
 	{
 		bResetHistory = true;
 		Layers.Reset();
+		Stride = 1.0f;
+		Lift = 1.0f;
 		SinceSearch = UE_BIG_NUMBER;
 		Past.Reset();
 		Phase = EPhase::Stand;
@@ -606,27 +611,36 @@ bool URammsCrowdAnimInstance::UpdateMotionMatching(const float DeltaSeconds)
 
 	// Keep the feet at the agent's speed: part by playing the clip faster or slower,
 	// the rest by lengthening or shortening the steps (stride warping), so neither
-	// shows on its own.
-	const float RootSpeed = ClipRootSpeed(Current.Sequence, Current.Time);
-	const float AgentSpeed = Speed0;
-	LocomotionPlayRate = 1.0f;
-	StrideScale = 1.0f;
-	if (RootSpeed > 30.0f && AgentSpeed > 30.0f)
+	// shows on its own. Faster than the clip is mostly quicker steps (as people walk):
+	// longer steps straighten the knees. The clip speed is the blend of every playing
+	// layer's, and the scales are eased, so a newly matched clip (which starts at no
+	// weight) can't change the legs at once.
+	float RootSpeed = 0.0f;
+	for (const FRammsCrowdMotionMatching::FLayer& Layer : State.Layers)
 	{
-		const float Ratio = AgentSpeed / RootSpeed;
+		RootSpeed += Layer.Weight * ClipRootSpeed(Layer.Sequence, Layer.Time);
+	}
+	const float AgentSpeed = Speed0;
+	const float Moving = FMath::SmoothStep(20.0f, 50.0f, FMath::Min(RootSpeed, AgentSpeed));
+	LocomotionPlayRate = 1.0f;
+	float WantStride = 1.0f;
+	float WantLift = 1.0f;
+	if (Moving > 0.0f)
+	{
+		const float Ratio = AgentSpeed / FMath::Max(RootSpeed, 1.0f);
 		const float MinRate = AnimSet->MotionMatchingMinPlayRate;
 		const float MaxRate = FMath::Max(AnimSet->MotionMatchingMaxPlayRate, MinRate);
-		LocomotionPlayRate = FMath::Clamp(AnimSet->bStrideWarping ? FMath::Sqrt(Ratio) : Ratio, MinRate, MaxRate);
+		const float Rate = AnimSet->bStrideWarping ? FMath::Pow(Ratio, Ratio > 1.0f ? 0.8f : 0.5f) : Ratio;
+		LocomotionPlayRate = FMath::Lerp(1.0f, FMath::Clamp(Rate, MinRate, MaxRate), Moving);
 		if (AnimSet->bStrideWarping)
 		{
-			StrideScale = FMath::Clamp(Ratio / LocomotionPlayRate, AnimSet->MinStrideScale, FMath::Max(AnimSet->MaxStrideScale, AnimSet->MinStrideScale));
+			WantStride = FMath::Lerp(1.0f, FMath::Clamp(Ratio / FMath::Max(LocomotionPlayRate, 0.01f), AnimSet->MinStrideScale, FMath::Max(AnimSet->MaxStrideScale, AnimSet->MinStrideScale)), Moving);
+		}
+		if (AnimSet->bScaleFootLift)
+		{
+			WantLift = FMath::Lerp(1.0f, FMath::Clamp(Ratio, AnimSet->MinFootLiftScale, 1.0f), Moving);
 		}
 	}
-	FootSpeedCmS = RootSpeed * LocomotionPlayRate * StrideScale;
-	FootLiftScale = AnimSet->bScaleFootLift && RootSpeed > 30.0f && AgentSpeed > 1.0f
-		? FMath::Clamp(AgentSpeed / RootSpeed, AnimSet->MinFootLiftScale, 1.0f)
-		: 1.0f;
-
 	// Distance matching for stops: play the stop clip so that the distance its root
 	// still travels equals the distance Mass has left to the goal, so the feet come to
 	// rest where the body does instead of the lock having to drag them there.
@@ -656,10 +670,16 @@ bool URammsCrowdAnimInstance::UpdateMotionMatching(const float DeltaSeconds)
 				}
 				const float TargetTime = (Index + 1) / SampleRate;
 				CurrentAdvance = FMath::Clamp(TargetTime - Current.Time, DeltaSeconds * 0.3f, DeltaSeconds * 1.6f);
-				StrideScale = 1.0f;
+				WantStride = 1.0f;
 			}
 		}
 	}
+	const float Ease = 1.0f - FMath::Exp(-DeltaSeconds / 0.2f);
+	State.Stride += (WantStride - State.Stride) * Ease;
+	State.Lift += (WantLift - State.Lift) * Ease;
+	StrideScale = State.Stride;
+	FootLiftScale = State.Lift;
+	FootSpeedCmS = RootSpeed * LocomotionPlayRate * StrideScale;
 	for (FRammsCrowdMotionMatching::FLayer& Layer : State.Layers)
 	{
 		const float Length = Layer.Sequence->GetPlayLength();
@@ -1146,6 +1166,9 @@ void FRammsCrowdAnimProxy::PreUpdate(UAnimInstance* InAnimInstance, const float 
 		Instance->FootLockCorrectionCm = FootLockCorrection;
 		Instance->FootLockOverstretches = FootLockOverstretches;
 		Instance->FootContactFromCurves = FootContactFromCurves;
+		Instance->PelvisDropCm = PelvisDrop;
+		Instance->FootLockBits = FootLockBits;
+		Instance->FootDebug = FootDebug;
 	}
 }
 
@@ -1162,26 +1185,6 @@ namespace
 		return MeshIndex == INDEX_NONE ? FCompactPoseBoneIndex(INDEX_NONE) : Bones.MakeCompactPoseIndex(FMeshPoseBoneIndex(MeshIndex));
 	}
 
-	/** Moves a leg's foot (keeping its rotation) with two-bone IK, the knee bending the way it already does. */
-	void PlaceFoot(FCSPose<FCompactPose>& ComponentPose, const FCompactPoseBoneIndex Thigh, const FCompactPoseBoneIndex Calf, const FCompactPoseBoneIndex Foot, const FVector& Target)
-	{
-		FTransform ThighT = ComponentPose.GetComponentSpaceTransform(Thigh);
-		FTransform CalfT = ComponentPose.GetComponentSpaceTransform(Calf);
-		FTransform FootT = ComponentPose.GetComponentSpaceTransform(Foot);
-		const FVector Mid = (ThighT.GetLocation() + FootT.GetLocation()) * 0.5;
-		FVector Bend = CalfT.GetLocation() - Mid;
-		if (Bend.SizeSquared() < 1.0)
-		{
-			Bend = FVector::YAxisVector;
-		}
-		const FVector Pole = CalfT.GetLocation() + Bend.GetSafeNormal() * 50.0;
-		URammsSeatedPoseAnimInstance::SolveLimb(ThighT, CalfT, FootT, Target, Pole, /*bKeepEndRotation*/ true);
-		TArray<FBoneTransform, TInlineAllocator<3>> Changed;
-		Changed.Add(FBoneTransform(Thigh, ThighT));
-		Changed.Add(FBoneTransform(Calf, CalfT));
-		Changed.Add(FBoneTransform(Foot, FootT));
-		ComponentPose.SafeSetCSBoneTransforms(Changed);
-	}
 }
 
 void FRammsCrowdAnimProxy::AdjustFeet(FCompactPose& Pose, const FBlendedCurve& Curve)
@@ -1227,90 +1230,115 @@ void FRammsCrowdAnimProxy::AdjustFeet(FCompactPose& Pose, const FBlendedCurve& C
 		const FVector RefAnkle = RefComponentPose.GetComponentSpaceTransform(Legs[0][2]).GetLocation();
 		const FVector RefBall = RefComponentPose.GetComponentSpaceTransform(Legs[0][3]).GetLocation();
 		RefFootPitch = static_cast<float>(FMath::RadiansToDegrees(FMath::Atan2(RefBall.Z - RefAnkle.Z, FVector::Dist2D(RefBall, RefAnkle))));
+		for (int32 Side = 0; Side < 2; ++Side)
+		{
+			const FTransform RefFoot = RefComponentPose.GetComponentSpaceTransform(Legs[Side][2]);
+			RefHeelLocal[Side] = RefFoot.InverseTransformPosition(FVector(RefFoot.GetLocation().X, RefFoot.GetLocation().Y, 0.0));
+		}
 	}
 
 	FCSPose<FCompactPose> ComponentPose;
 	ComponentPose.InitPose(Pose);
-
-	// Stride warping: lengthen or shorten the steps along the direction of travel so
-	// the feet keep pace with the body without playing the clip faster or slower.
-	const float Stride = Frame.StrideScale;
-	if (FMath::Abs(Stride - 1.0f) > 0.01f && Frame.AgentVelocity.SizeSquared2D() > 400.0)
+	const auto KneeAngle = [&ComponentPose, &Legs](const int32 Side)
 	{
-		const FVector Direction = ComponentToWorld.InverseTransformVectorNoScale(Frame.AgentVelocity).GetSafeNormal2D();
-		const FVector Hips = ComponentPose.GetComponentSpaceTransform(Pelvis).GetLocation();
-		for (int32 Side = 0; Side < 2; ++Side)
-		{
-			const FVector FootAt = ComponentPose.GetComponentSpaceTransform(Legs[Side][2]).GetLocation();
-			const double Along = FVector::DotProduct(FootAt - Hips, Direction);
-			PlaceFoot(ComponentPose, Legs[Side][0], Legs[Side][1], Legs[Side][2], FootAt + Direction * (Along * (Stride - 1.0f)));
-		}
+		const FVector H = ComponentPose.GetComponentSpaceTransform(Legs[Side][0]).GetLocation();
+		const FVector K = ComponentPose.GetComponentSpaceTransform(Legs[Side][1]).GetLocation();
+		const FVector A = ComponentPose.GetComponentSpaceTransform(Legs[Side][2]).GetLocation();
+		return static_cast<float>(FMath::RadiansToDegrees(FMath::Acos(FMath::Clamp(FVector::DotProduct((K - H).GetSafeNormal(), (A - K).GetSafeNormal()), -1.0, 1.0))));
+	};
+	FootDebug.X = KneeAngle(0);
+	{
+		const FVector H = ComponentPose.GetComponentSpaceTransform(Legs[0][0]).GetLocation();
+		const FVector K = ComponentPose.GetComponentSpaceTransform(Legs[0][1]).GetLocation();
+		const FVector A = ComponentPose.GetComponentSpaceTransform(Legs[0][2]).GetLocation();
+		FootDebug.Z = (A - H).Size() / FMath::Max((K - H).Size() + (A - K).Size(), 1.0);
 	}
 
-	// Foot lift scaling: pull the foot's height and heel / toe rotation toward flat for a
-	// pedestrian walking slower than the clip, as a slow walk lifts the feet less.
+	// Everything below changes where each foot should be; the legs are then solved once
+	// each at the end (with the hips lowered if a leg can't reach), so the knee bends
+	// smoothly instead of being re-solved, straightened and snapped by several passes.
+	FTransform Target[2];
+	FVector BallAt[2];
+	const FVector Hips = ComponentPose.GetComponentSpaceTransform(Pelvis).GetLocation();
+	const FVector Travel = ComponentToWorld.InverseTransformVectorNoScale(Frame.AgentVelocity).GetSafeNormal2D();
+	const float Stride = Frame.AgentVelocity.SizeSquared2D() > 400.0 ? Frame.StrideScale : 1.0f;
 	const float LiftScale = Frame.FootLiftScale;
-	if (LiftScale < 0.99f)
+	// Flat stance, measured on the clips: the ankle sits ~1.5 cm higher and the foot
+	// ~5 degrees more toe-down than the bind pose.
+	const float FlatAnkle = RefAnkleHeight + 1.5f;
+	const float FlatPitch = RefFootPitch - 5.0f;
+	for (int32 Side = 0; Side < 2; ++Side)
 	{
-		// Flat stance, measured on the clips: the ankle sits ~1.5 cm higher and the foot
-		// ~5 degrees more toe-down than the bind pose.
-		const float FlatAnkle = RefAnkleHeight + 1.5f;
-		const float FlatPitch = RefFootPitch - 5.0f;
-		for (int32 Side = 0; Side < 2; ++Side)
+		Target[Side] = ComponentPose.GetComponentSpaceTransform(Legs[Side][2]);
+		BallAt[Side] = ComponentPose.GetComponentSpaceTransform(Legs[Side][3]).GetLocation();
+
+		// Stride warping: lengthen or shorten the steps along the direction of travel.
+		if (FMath::Abs(Stride - 1.0f) > 0.01f)
 		{
-			FTransform FootT = ComponentPose.GetComponentSpaceTransform(Legs[Side][2]);
-			const FVector Ankle = FootT.GetLocation();
-			const FVector Ball = ComponentPose.GetComponentSpaceTransform(Legs[Side][3]).GetLocation();
-			const FVector Along = FVector(Ball.X - Ankle.X, Ball.Y - Ankle.Y, 0.0).GetSafeNormal();
-			if (Along.IsNearlyZero())
+			const FVector Shift = Travel * (FVector::DotProduct(Target[Side].GetLocation() - Hips, Travel) * (Stride - 1.0f));
+			Target[Side].AddToTranslation(Shift);
+			BallAt[Side] += Shift;
+		}
+
+		// Foot lift scaling: a slow walker rolls its feet less (toe lift at heel strike,
+		// heel rise at toe-off) and lifts them a little less. A foot on the ground keeps
+		// its heel rise and height: lowering the heel of a planted foot would have to
+		// straighten the trailing leg to reach. Lowering a swinging foot is also kept
+		// within the leg's reach as the clip has it, so the knee is never forced straight.
+		if (LiftScale < 0.99f)
+		{
+			static const FName LiftContactCurves[2] = { FName(TEXT("contact_l")), FName(TEXT("contact_r")) };
+			bool bHasContact = false;
+			const float ContactValue = Curve.Get(LiftContactCurves[Side], bHasContact, 0.0f);
+			const float Swing = bHasContact
+				? 1.0f - FMath::Clamp(ContactValue, 0.0f, 1.0f)
+				: FMath::SmoothStep(RefBallHeight + 2.0f, RefBallHeight + 6.0f, static_cast<float>(BallAt[Side].Z));
+			const FVector Ankle = Target[Side].GetLocation();
+			const FVector Along = FVector(BallAt[Side].X - Ankle.X, BallAt[Side].Y - Ankle.Y, 0.0).GetSafeNormal();
+			if (!Along.IsNearlyZero())
 			{
-				continue;
-			}
-			const float Pitch = static_cast<float>(FMath::RadiansToDegrees(FMath::Atan2(Ball.Z - Ankle.Z, FVector::Dist2D(Ball, Ankle))));
-			const float NewPitch = FlatPitch + (Pitch - FlatPitch) * LiftScale;
-			// Rotate about the foot's sideways axis (Along x Up: a positive angle lifts the toe).
-			const FVector Sideways = FVector::CrossProduct(Along, FVector::UpVector).GetSafeNormal();
-			const FQuat Turn(Sideways, FMath::DegreesToRadians(NewPitch - Pitch));
-			FootT.SetRotation((Turn * FootT.GetRotation()).GetNormalized());
-			const float Height = static_cast<float>(Ankle.Z);
-			const float NewHeight = Height > FlatAnkle ? FlatAnkle + (Height - FlatAnkle) * LiftScale : Height;
-			const FVector Target(Ankle.X, Ankle.Y, NewHeight);
-			// Rotation first (the IK keeps it), then reach the lowered ankle.
-			TArray<FBoneTransform, TInlineAllocator<1>> Rotated;
-			Rotated.Add(FBoneTransform(Legs[Side][2], FootT));
-			ComponentPose.SafeSetCSBoneTransforms(Rotated);
-			if (FMath::Abs(NewHeight - Height) > 0.05f)
-			{
-				PlaceFoot(ComponentPose, Legs[Side][0], Legs[Side][1], Legs[Side][2], Target);
+				const float Pitch = static_cast<float>(FMath::RadiansToDegrees(FMath::Atan2(BallAt[Side].Z - Ankle.Z, FVector::Dist2D(BallAt[Side], Ankle))));
+				// Toe up (heel strike) flattens on or off the ground; toe down only in the air.
+				const float Scale = FMath::Lerp(1.0f, LiftScale, Pitch > FlatPitch ? 1.0f : Swing);
+				const FVector Sideways = FVector::CrossProduct(Along, FVector::UpVector).GetSafeNormal();
+				const FQuat Turn(Sideways, FMath::DegreesToRadians((FlatPitch + (Pitch - FlatPitch) * Scale) - Pitch));
+				Target[Side].SetRotation((Turn * Target[Side].GetRotation()).GetNormalized());
+				BallAt[Side] = Ankle + Turn.RotateVector(BallAt[Side] - Ankle);
+				const double Height = Ankle.Z;
+				if (Height > FlatAnkle && Swing > 0.0f)
+				{
+					const float HeightScale = FMath::Sqrt(FMath::Lerp(1.0f, LiftScale, Swing));
+					double NewHeight = FlatAnkle + (Height - FlatAnkle) * HeightScale;
+					const FVector Hip = ComponentPose.GetComponentSpaceTransform(Legs[Side][0]).GetLocation();
+					const FVector Knee = ComponentPose.GetComponentSpaceTransform(Legs[Side][1]).GetLocation();
+					const double Limit = FMath::Max((Ankle - Hip).Size(), 0.94 * ((Knee - Hip).Size() + (Ankle - Knee).Size()));
+					const double Horizontal = FVector2D(Ankle.X - Hip.X, Ankle.Y - Hip.Y).Size();
+					if (Horizontal < Limit)
+					{
+						NewHeight = FMath::Max(NewHeight, Hip.Z - FMath::Sqrt(FMath::Square(Limit) - FMath::Square(Horizontal)));
+					}
+					const FVector Down(0.0, 0.0, FMath::Min(NewHeight - Height, 0.0));
+					Target[Side].AddToTranslation(Down);
+					BallAt[Side] += Down;
+				}
 			}
 		}
 	}
 
-	if (!Frame.bLockFeet)
-	{
-		FootLocks[0] = FootLocks[1] = FFootLock();
-		LockedFeet = 0;
-		FootLockCorrection = 0.0f;
-		FCSPose<FCompactPose>::ConvertComponentPosesToLocalPosesSafe(ComponentPose, Pose);
-		return;
-	}
-
-	// Foot contact: from the clips' authored contact curves when they have them
-	// (GASP: heel strike to toe-off), else from foot heights.
+	// Foot locking. Contact comes from the clips' authored contact curves when they
+	// have them (GASP: heel strike to toe-off), else from foot heights.
 	static const FName ContactCurves[2] = { FName(TEXT("contact_l")), FName(TEXT("contact_r")) };
 	const float FootStepSeconds = FMath::Max(Set->FootStepSeconds, 0.05f);
 	int32 NumLocked = 0;
 	FootLockCorrection = 0.0f;
 	FootContactFromCurves = 0;
-	for (int32 Side = 0; Side < 2; ++Side)
+	for (int32 Side = 0; Side < 2 && Frame.bLockFeet; ++Side)
 	{
-		const FCompactPoseBoneIndex Foot = Legs[Side][2];
-		const FCompactPoseBoneIndex Ball = Legs[Side][3];
 		FFootLock& Lock = FootLocks[Side];
 		const FFootLock& Other = FootLocks[1 - Side];
-		const FTransform FootT = ComponentPose.GetComponentSpaceTransform(Foot);
+		const FTransform& FootT = Target[Side];
 		const FVector AnkleCS = FootT.GetLocation();
-		const FVector BallCS = ComponentPose.GetComponentSpaceTransform(Ball).GetLocation();
+		const FVector BallCS = BallAt[Side];
 		const bool bBallDown = BallCS.Z < RefBallHeight + 2.5f;
 
 		bool bHasCurve = false;
@@ -1333,7 +1361,7 @@ void FRammsCrowdAnimProxy::AdjustFeet(FCompactPose& Pose, const FBlendedCurve& C
 			bContact = AnkleCS.Z < RefAnkleHeight + 3.5f || (BallCS.Z < Set->FootPlantHeightCm && AnkleCS.Z < RefAnkleHeight + 6.0f);
 		}
 
-		float Lift = 0.0f;
+		float StepLift = 0.0f;
 		if (Lock.StepTime >= 0.0f)
 		{
 			// A procedural step back under the body (see below).
@@ -1341,7 +1369,7 @@ void FRammsCrowdAnimProxy::AdjustFeet(FCompactPose& Pose, const FBlendedCurve& C
 			const float T = FMath::Min(Lock.StepTime, 1.0f);
 			Lock.Offset = Lock.StepFrom * (1.0f - FMath::SmoothStep(0.0f, 1.0f, T));
 			Lock.Alpha = 1.0f;
-			Lift = FMath::Sin(T * UE_PI) * Set->FootStepHeightCm;
+			StepLift = FMath::Sin(T * UE_PI) * Set->FootStepHeightCm;
 			if (Lock.StepTime >= 1.0f)
 			{
 				Lock.StepTime = -1.0f;
@@ -1360,8 +1388,10 @@ void FRammsCrowdAnimProxy::AdjustFeet(FCompactPose& Pose, const FBlendedCurve& C
 				// from where the (still correcting) foot is, so nothing jumps.
 				Lock.bLocked = true;
 				Lock.bPinBall = bBallDown;
-				const FVector PinCS = Lock.bPinBall ? BallCS : FVector(AnkleCS.X, AnkleCS.Y, 0.0);
-				Lock.PinLocal = FootT.InverseTransformPosition(PinCS);
+				// The heel is a fixed point of the foot, so it stays put while the foot
+				// rolls flat about it.
+				Lock.PinLocal = Lock.bPinBall ? FootT.InverseTransformPosition(BallCS) : RefHeelLocal[Side];
+				const FVector PinCS = FootT.TransformPosition(Lock.PinLocal);
 				Lock.LockedWorld = ComponentToWorld.TransformPosition(PinCS + Applied);
 				Lock.Offset = Applied;
 				Lock.Alpha = 1.0f;
@@ -1375,8 +1405,8 @@ void FRammsCrowdAnimProxy::AdjustFeet(FCompactPose& Pose, const FBlendedCurve& C
 			{
 				if (!Lock.bPinBall && bBallDown)
 				{
-					// The foot has rolled flat: from here it pivots about the ball (and
-					// at toe-off about the ball still). Re-pin at the ball where it is now.
+					// The foot has rolled flat: from here it pivots about the ball (and at
+					// toe-off about the ball still). Re-pin at the ball where it is now.
 					Lock.bPinBall = true;
 					Lock.PinLocal = FootT.InverseTransformPosition(BallCS);
 					Lock.LockedWorld = ComponentToWorld.TransformPosition(BallCS + Lock.Offset);
@@ -1386,7 +1416,20 @@ void FRammsCrowdAnimProxy::AdjustFeet(FCompactPose& Pose, const FBlendedCurve& C
 				Correction.Z = 0.0;
 				Lock.Offset = ComponentToWorld.InverseTransformVector(Correction);
 				Lock.Offset.Z = 0.0;
-				const float Distance = static_cast<float>(Correction.Size());
+				float Distance = static_cast<float>(Correction.Size());
+				// Walking: the clip's feet already land about where the body goes, so a
+				// planted foot only holds against small drift and then gives way, keeping
+				// the clip's leg motion instead of straightening the leg.
+				const float Walking = FMath::SmoothStep(30.0f, 80.0f, static_cast<float>(Frame.AgentVelocity.Size2D()));
+				const float Hold = FMath::Lerp(UE_BIG_NUMBER, Set->WalkingFootLockMaxCm, Walking);
+				if (Walking > 0.0f && Distance > Hold)
+				{
+					Correction *= Hold / Distance;
+					Lock.LockedWorld = PinWorld + Correction;
+					Lock.Offset = ComponentToWorld.InverseTransformVector(Correction);
+					Lock.Offset.Z = 0.0;
+					Distance = Hold;
+				}
 				// The body has drifted too far from a planted foot (a standing pedestrian
 				// pushed aside): take a step rather than stretch the leg or slide the foot.
 				// One foot at a time unless badly overstretched.
@@ -1399,27 +1442,132 @@ void FRammsCrowdAnimProxy::AdjustFeet(FCompactPose& Pose, const FBlendedCurve& C
 					++FootLockOverstretches;
 				}
 			}
-			else if (Lock.StepTime < 0.0f && Lock.Alpha > 0.0f)
+			else if (Lock.Alpha > 0.0f)
 			{
 				// In the swing: hand the foot back to the clip smoothly.
-				Lock.Alpha = FMath::Max(0.0f, Lock.Alpha - DeltaSeconds / 0.4f);
+				Lock.Alpha = FMath::Max(0.0f, Lock.Alpha - DeltaSeconds / FMath::Max(Set->FootReleaseSeconds, 0.05f));
 			}
 		}
 		if (Lock.bLocked)
 		{
 			++NumLocked;
 		}
-
 		const float Weight = Lock.bLocked || Lock.StepTime >= 0.0f ? 1.0f : FMath::SmoothStep(0.0f, 1.0f, Lock.Alpha);
-		const FVector Offset = Lock.Offset * Weight + FVector(0.0, 0.0, Lift);
 		FootLockCorrection = FMath::Max(FootLockCorrection, static_cast<float>((Lock.Offset * Weight).Size()));
-		if (Offset.SizeSquared() < 0.01)
+		Target[Side].AddToTranslation(Lock.Offset * Weight + FVector(0.0, 0.0, StepLift));
+	}
+	if (!Frame.bLockFeet)
+	{
+		FootLocks[0] = FootLocks[1] = FFootLock();
+	}
+	LockedFeet = NumLocked;
+	FootLockBits = 0;
+	for (int32 Side = 0; Side < 2; ++Side)
+	{
+		FootLockBits |= (FootLocks[Side].bLocked ? 1 : 0) << Side;
+		FootLockBits |= (FootLocks[Side].StepTime >= 0.0f ? 1 : 0) << (2 + Side);
+		FootLockBits |= (FootLocks[Side].bPinBall ? 1 : 0) << (4 + Side);
+	}
+
+	// Hips: if a leg can't comfortably reach its foot, lower the pelvis (as a walker's
+	// hips dip into a long step) rather than straightening the knee; if both legs have
+	// been brought closer (shorter steps), raise it so the knees keep the clip's bend
+	// instead of crouching. "Comfortable" is at least as far as the clip itself reaches,
+	// so a pose the clip plays as captured is left alone. Eased so the body doesn't bob.
+	float Drop = -UE_BIG_NUMBER;
+	float Reach[2];
+	float SoftStart[2];
+	for (int32 Side = 0; Side < 2; ++Side)
+	{
+		const FVector Hip = ComponentPose.GetComponentSpaceTransform(Legs[Side][0]).GetLocation();
+		const FVector Knee = ComponentPose.GetComponentSpaceTransform(Legs[Side][1]).GetLocation();
+		const FVector Ankle = ComponentPose.GetComponentSpaceTransform(Legs[Side][2]).GetLocation();
+		Reach[Side] = static_cast<float>((Knee - Hip).Size() + (Ankle - Knee).Size());
+		const float Captured = static_cast<float>((Ankle - Hip).Size());
+		SoftStart[Side] = FMath::Clamp(Captured, 0.97f * Reach[Side], 0.998f * Reach[Side]);
+		const FVector To = Target[Side].GetLocation() - Hip;
+		const double Distance = To.Size();
+		const double Horizontal = FVector2D(To.X, To.Y).Size();
+		// The hip height at which this leg would be as long as the clip has it (or,
+		// when it is out of reach, just comfortable).
+		const double Want = Distance > SoftStart[Side] ? SoftStart[Side] : FMath::Min<double>(Captured, Distance > Captured ? Distance : Captured);
+		float Need = 0.0f;
+		if (Horizontal < Want && (Distance > SoftStart[Side] || Distance < Captured))
+		{
+			const double HipZ = Target[Side].GetLocation().Z + FMath::Sqrt(FMath::Square(Want) - FMath::Square(Horizontal));
+			Need = static_cast<float>(Hip.Z - HipZ);
+		}
+		// A swinging leg bends to whatever height the hips are at, so it only has a say
+		// when it can't reach.
+		bool bHasContact = false;
+		const float ContactValue = Curve.Get(ContactCurves[Side], bHasContact, 1.0f);
+		const bool bSwinging = bHasContact ? ContactValue < 0.5f : Target[Side].GetLocation().Z > RefAnkleHeight + 8.0f;
+		if (bSwinging && Need <= 0.0f)
 		{
 			continue;
 		}
-		PlaceFoot(ComponentPose, Legs[Side][0], Legs[Side][1], Foot, AnkleCS + Offset);
+		Drop = FMath::Max(Drop, Need);
 	}
-	LockedFeet = NumLocked;
+	Drop = Drop <= -UE_BIG_NUMBER * 0.5f ? 0.0f : FMath::Clamp(Drop, -3.5f, 5.0f);
+	const float DropRate = 0.08f;
+	PelvisDrop += (Drop - PelvisDrop) * (1.0f - FMath::Exp(-DeltaSeconds / DropRate));
+	if (Frame.bResetFootLocks)
+	{
+		PelvisDrop = Drop;
+		KneeBend[0] = KneeBend[1] = FVector::ZeroVector;
+	}
+	if (FMath::Abs(PelvisDrop) > 0.05f)
+	{
+		FTransform PelvisT = ComponentPose.GetComponentSpaceTransform(Pelvis);
+		PelvisT.AddToTranslation(FVector(0.0, 0.0, -PelvisDrop));
+		TArray<FBoneTransform, TInlineAllocator<1>> Lowered;
+		Lowered.Add(FBoneTransform(Pelvis, PelvisT));
+		ComponentPose.SafeSetCSBoneTransforms(Lowered);
+	}
+
+	// One two-bone solve per leg, easing off full extension (soft IK) so the knee
+	// never snaps straight.
+	for (int32 Side = 0; Side < 2; ++Side)
+	{
+		FTransform ThighT = ComponentPose.GetComponentSpaceTransform(Legs[Side][0]);
+		FTransform CalfT = ComponentPose.GetComponentSpaceTransform(Legs[Side][1]);
+		FTransform FootT = ComponentPose.GetComponentSpaceTransform(Legs[Side][2]);
+
+		// The knee bends the way the clip bends it; when the clip's leg is nearly
+		// straight that direction is noise, so keep the last clear one.
+		const FVector Mid = (ThighT.GetLocation() + FootT.GetLocation()) * 0.5;
+		const FVector Bend = CalfT.GetLocation() - Mid;
+		const double BendSize = Bend.Size();
+		if (BendSize > 2.0 || KneeBend[Side].IsNearlyZero())
+		{
+			const FVector Clear = BendSize > UE_KINDA_SMALL_NUMBER ? Bend / BendSize : FVector::YAxisVector;
+			const float Trust = KneeBend[Side].IsNearlyZero() ? 1.0f : FMath::Clamp(static_cast<float>((BendSize - 2.0) / 4.0), 0.0f, 1.0f);
+			KneeBend[Side] = FMath::Lerp(KneeBend[Side], Clear, Trust).GetSafeNormal();
+		}
+
+		if (FootT.GetLocation().Equals(Target[Side].GetLocation(), 0.05) && FootT.GetRotation().Equals(Target[Side].GetRotation(), 1.0e-4))
+		{
+			continue;
+		}
+		FVector Effector = Target[Side].GetLocation();
+		const FVector FromHip = Effector - ThighT.GetLocation();
+		const float Distance = static_cast<float>(FromHip.Size());
+		const float Span = Reach[Side] - SoftStart[Side];
+		if (Distance > SoftStart[Side] && Span > UE_KINDA_SMALL_NUMBER)
+		{
+			const float Soft = SoftStart[Side] + Span * (1.0f - FMath::Exp(-(Distance - SoftStart[Side]) / Span));
+			Effector = ThighT.GetLocation() + FromHip / Distance * Soft;
+		}
+		const FVector Pole = CalfT.GetLocation() + KneeBend[Side] * 50.0;
+		FootT.SetRotation(Target[Side].GetRotation());
+		URammsSeatedPoseAnimInstance::SolveLimb(ThighT, CalfT, FootT, Effector, Pole, /*bKeepEndRotation*/ true);
+		TArray<FBoneTransform, TInlineAllocator<3>> Changed;
+		Changed.Add(FBoneTransform(Legs[Side][0], ThighT));
+		Changed.Add(FBoneTransform(Legs[Side][1], CalfT));
+		Changed.Add(FBoneTransform(Legs[Side][2], FootT));
+		ComponentPose.SafeSetCSBoneTransforms(Changed);
+	}
+	FootDebug.Y = KneeAngle(0);
 	FCSPose<FCompactPose>::ConvertComponentPosesToLocalPosesSafe(ComponentPose, Pose);
 }
 

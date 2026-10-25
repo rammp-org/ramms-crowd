@@ -225,6 +225,18 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Ramms|Crowd|Locomotion", meta = (ClampMin = "0.0"))
 	float FootLockMaxDistanceCm = 12.0f;
 
+	/**
+	 * While walking, a locked foot gives way (slips a little) once it is this far from
+	 * where the clip has it, cm, rather than holding the leg until it straightens and
+	 * then stepping: the clip's own stride is kept. Faded in between 30 and 80 cm/s.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Ramms|Crowd|Locomotion", meta = (ClampMin = "0.0"))
+	float WalkingFootLockMaxCm = 4.0f;
+
+	/** How long a released foot takes to go back to the clip during its swing, s. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Ramms|Crowd|Locomotion", meta = (ClampMin = "0.05"))
+	float FootReleaseSeconds = 0.25f;
+
 	/** Duration and height of that step. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Ramms|Crowd|Locomotion", meta = (ClampMin = "0.05"))
 	float FootStepSeconds = 0.3f;

@@ -171,6 +171,17 @@ public:
 	UPROPERTY(BlueprintReadOnly, Category = "Ramms|Crowd")
 	int32 FootContactFromCurves = 0;
 
+	/** Debug: hip drop applied last frame (cm, negative when raised), and per foot (bits 0/1) whether it was locked, stepping, or pinned at the ball. */
+	UPROPERTY(BlueprintReadOnly, Category = "Ramms|Crowd")
+	float PelvisDropCm = 0.0f;
+
+	UPROPERTY(BlueprintReadOnly, Category = "Ramms|Crowd")
+	int32 FootLockBits = 0;
+
+	/** Debug: left knee angle as the clip has it and after the feet are adjusted (deg), and the clip's left hip-to-ankle distance over the leg's reach. */
+	UPROPERTY(BlueprintReadOnly, Category = "Ramms|Crowd")
+	FVector FootDebug = FVector::ZeroVector;
+
 	/** Foot lift and heel / toe rotation scale applied last frame (1 = as captured). */
 	UPROPERTY(BlueprintReadOnly, Category = "Ramms|Crowd")
 	float FootLiftScale = 1.0f;
@@ -289,4 +300,12 @@ private:
 	float RefBallHeight = 0.0f;
 	/** Pitch of the ankle-to-ball line in the reference pose, degrees (negative: ball below ankle). */
 	float RefFootPitch = 0.0f;
+	/** Current hip drop (cm) that keeps the legs from over-extending; eased. */
+	float PelvisDrop = 0.0f;
+	int32 FootLockBits = 0;
+	/** Last clear knee bend direction per leg (component space), so a nearly straight leg keeps a stable pole. */
+	FVector KneeBend[2] = { FVector::ZeroVector, FVector::ZeroVector };
+	FVector FootDebug = FVector::ZeroVector;
+	/** The heel (the sole under the ankle in the flat bind pose), in the foot bone's space. */
+	FVector RefHeelLocal[2] = { FVector::ZeroVector, FVector::ZeroVector };
 };
