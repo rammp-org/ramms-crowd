@@ -85,6 +85,12 @@ struct FRammsCrowdAnimFrame
 	FVector AgentVelocity = FVector::ZeroVector;
 	/** Foot lift / rotation scale (1 = as captured). */
 	float FootLiftScale = 1.0f;
+	/** Motion matching: the playing clips' root travel direction in component space (zero when unknown), for orientation warping. */
+	FVector ClipTravel = FVector::ZeroVector;
+	/** Motion matching is playing a start or stop clip: planted feet hold firmly (no walking slip). */
+	bool bFirmFootLock = false;
+	/** Orientation warping limit, degrees (0 = off). */
+	float MaxOrientationWarpDegrees = 0.0f;
 };
 
 /**
@@ -177,6 +183,16 @@ public:
 
 	UPROPERTY(BlueprintReadOnly, Category = "Ramms|Crowd")
 	int32 FootLockBits = 0;
+
+	/** Debug: lower-body orientation warp applied last frame, degrees. */
+	UPROPERTY(BlueprintReadOnly, Category = "Ramms|Crowd")
+	float OrientationWarpDegrees = 0.0f;
+
+	/** Motion matching is playing a start or stop clip (game thread). */
+	bool bMotionTransitionClip = false;
+
+	/** Motion matching: the playing clips' root velocity in component space (game thread). */
+	FVector MotionClipTravel = FVector::ZeroVector;
 
 	/** Debug: left knee angle as the clip has it and after the feet are adjusted (deg), and the clip's left hip-to-ankle distance over the leg's reach. */
 	UPROPERTY(BlueprintReadOnly, Category = "Ramms|Crowd")
@@ -303,6 +319,9 @@ private:
 	/** Current hip drop (cm) that keeps the legs from over-extending; eased. */
 	float PelvisDrop = 0.0f;
 	int32 FootLockBits = 0;
+	/** Orientation warp applied to the lower body, degrees (eased). */
+	float OrientationWarp = 0.0f;
+
 	/** Last clear knee bend direction per leg (component space), so a nearly straight leg keeps a stable pole. */
 	FVector KneeBend[2] = { FVector::ZeroVector, FVector::ZeroVector };
 	FVector FootDebug = FVector::ZeroVector;

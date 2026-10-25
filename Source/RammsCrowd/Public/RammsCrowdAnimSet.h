@@ -231,7 +231,17 @@ public:
 	 * then stepping: the clip's own stride is kept. Faded in between 30 and 80 cm/s.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Ramms|Crowd|Locomotion", meta = (ClampMin = "0.0"))
-	float WalkingFootLockMaxCm = 4.0f;
+	float WalkingFootLockMaxCm = 6.0f;
+
+	/**
+	 * Orientation warping (motion matching): when the body faces a different way
+	 * from where it is going (Mass turns the body after the velocity), the hips and
+	 * legs turn toward the direction of travel by up to this angle and the spine
+	 * turns most of the way back, so the steps go where the body goes instead of
+	 * sliding sideways. 0 turns it off.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Ramms|Crowd|Locomotion", meta = (ClampMin = "0.0", ClampMax = "90.0"))
+	float MaxOrientationWarpDegrees = 60.0f;
 
 	/** How long a released foot takes to go back to the clip during its swing, s. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Ramms|Crowd|Locomotion", meta = (ClampMin = "0.05"))

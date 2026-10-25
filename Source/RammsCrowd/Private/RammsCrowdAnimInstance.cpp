@@ -324,6 +324,22 @@ struct FRammsCrowdMotionMatching
 
 namespace
 {
+	/** A clip's root motion velocity around Time, in the root's own space, cm/s. */
+	FVector ClipRootVelocity(const UAnimSequence* Sequence, const float Time)
+	{
+		const float Length = Sequence->GetPlayLength();
+		const float Start = FMath::Clamp(Time - 0.1f, 0.0f, Length);
+		const float End = FMath::Clamp(Time + 0.1f, 0.0f, Length);
+		if (End - Start < 0.02f)
+		{
+			return FVector::ZeroVector;
+		}
+		const FTransform A = Sequence->ExtractRootTrackTransform(FAnimExtractContext(static_cast<double>(Start)), nullptr);
+		const FTransform B = Sequence->ExtractRootTrackTransform(FAnimExtractContext(static_cast<double>(End)), nullptr);
+		const FVector Delta = A.InverseTransformVectorNoScale(B.GetLocation() - A.GetLocation());
+		return FVector(Delta.X, Delta.Y, 0.0) / (End - Start);
+	}
+
 	/** Ground speed of a clip's root motion around Time, cm/s. */
 	float ClipRootSpeed(const UAnimSequence* Sequence, const float Time)
 	{
@@ -375,6 +391,7 @@ bool URammsCrowdAnimInstance::UpdateMotionMatching(const float DeltaSeconds)
 	if (Comp == nullptr || Mesh == nullptr || !AnimSet->bUseMotionMatching || AnimSet->MotionMatching.IsEmpty())
 	{
 		bMotionMatching = false;
+		MotionClipTravel = FVector::ZeroVector;
 		return false;
 	}
 	if (!MotionMatching.IsValid())
@@ -587,6 +604,7 @@ bool URammsCrowdAnimInstance::UpdateMotionMatching(const float DeltaSeconds)
 		Frame.bResetPoseHistory = State.bResetHistory;
 		State.bResetHistory = false;
 		bMotionMatching = false;
+		MotionClipTravel = FVector::ZeroVector;
 		return false;
 	}
 
@@ -611,14 +629,18 @@ bool URammsCrowdAnimInstance::UpdateMotionMatching(const float DeltaSeconds)
 
 	// Keep the feet at the agent's speed: part by playing the clip faster or slower,
 	// the rest by lengthening or shortening the steps (stride warping), so neither
-	// shows on its own. Faster than the clip is mostly quicker steps (as people walk):
-	// longer steps straighten the knees. The clip speed is the blend of every playing
+	// shows on its own. Mostly by rate (people change their cadence as much as their
+	// step length), because re-placing the feet changes how the knees bend: shorter
+	// steps bend the leg reaching forward, longer ones straighten the trailing leg. The clip speed is the blend of every playing
 	// layer's, and the scales are eased, so a newly matched clip (which starts at no
 	// weight) can't change the legs at once.
 	float RootSpeed = 0.0f;
+	MotionClipTravel = FVector::ZeroVector;
+	bMotionTransitionClip = !Current.bLooping && (State.Phase == EPhase::Start || State.Phase == EPhase::Stop);
 	for (const FRammsCrowdMotionMatching::FLayer& Layer : State.Layers)
 	{
 		RootSpeed += Layer.Weight * ClipRootSpeed(Layer.Sequence, Layer.Time);
+		MotionClipTravel += Layer.Weight * ClipRootVelocity(Layer.Sequence, Layer.Time);
 	}
 	const float AgentSpeed = Speed0;
 	const float Moving = FMath::SmoothStep(20.0f, 50.0f, FMath::Min(RootSpeed, AgentSpeed));
@@ -630,7 +652,7 @@ bool URammsCrowdAnimInstance::UpdateMotionMatching(const float DeltaSeconds)
 		const float Ratio = AgentSpeed / FMath::Max(RootSpeed, 1.0f);
 		const float MinRate = AnimSet->MotionMatchingMinPlayRate;
 		const float MaxRate = FMath::Max(AnimSet->MotionMatchingMaxPlayRate, MinRate);
-		const float Rate = AnimSet->bStrideWarping ? FMath::Pow(Ratio, Ratio > 1.0f ? 0.8f : 0.5f) : Ratio;
+		const float Rate = AnimSet->bStrideWarping ? FMath::Pow(Ratio, 0.8f) : Ratio;
 		LocomotionPlayRate = FMath::Lerp(1.0f, FMath::Clamp(Rate, MinRate, MaxRate), Moving);
 		if (AnimSet->bStrideWarping)
 		{
@@ -975,6 +997,9 @@ void URammsCrowdAnimInstance::NativeUpdateAnimation(const float DeltaSeconds)
 	Frame.StrideScale = LocomotionAlpha > 0.0f ? FMath::Lerp(1.0f, StrideScale, LocomotionAlpha) : 1.0f;
 	Frame.FootLiftScale = LocomotionAlpha > 0.0f ? FMath::Lerp(1.0f, FootLiftScale, LocomotionAlpha) : 1.0f;
 	Frame.AgentVelocity = Comp->MassVelocity;
+	Frame.ClipTravel = bMotionMatching ? MotionClipTravel : FVector::ZeroVector;
+	Frame.bFirmFootLock = bMotionMatching && bMotionTransitionClip;
+	Frame.MaxOrientationWarpDegrees = AnimSet->MaxOrientationWarpDegrees;
 	Frame.bResetFootLocks = bPendingFootReset;
 	bPendingFootReset = false;
 
@@ -1169,6 +1194,8 @@ void FRammsCrowdAnimProxy::PreUpdate(UAnimInstance* InAnimInstance, const float 
 		Instance->PelvisDropCm = PelvisDrop;
 		Instance->FootLockBits = FootLockBits;
 		Instance->FootDebug = FootDebug;
+		Instance->OrientationWarpDegrees = OrientationWarp;
+
 	}
 }
 
@@ -1239,6 +1266,48 @@ void FRammsCrowdAnimProxy::AdjustFeet(FCompactPose& Pose, const FBlendedCurve& C
 
 	FCSPose<FCompactPose> ComponentPose;
 	ComponentPose.InitPose(Pose);
+
+	// Orientation warping (motion matching): Mass turns the body after its velocity,
+	// so a clip walking straight ahead can be heading somewhere the body isn't going,
+	// and the planted feet slide sideways. Turn the hips (and with them the legs)
+	// toward the direction of travel, and the spine most of the way back so the upper
+	// body keeps facing where the body faces.
+	{
+		float WantWarp = 0.0f;
+		const FVector TravelCS = ComponentToWorld.InverseTransformVectorNoScale(Frame.AgentVelocity);
+		const FVector& ClipDir = Frame.ClipTravel;
+		if (Frame.MaxOrientationWarpDegrees > 0.0f && ClipDir.SizeSquared2D() > 900.0 && TravelCS.SizeSquared2D() > 900.0)
+		{
+			const float Angle = static_cast<float>(FMath::RadiansToDegrees(FMath::Atan2(
+				ClipDir.X * TravelCS.Y - ClipDir.Y * TravelCS.X, ClipDir.X * TravelCS.X + ClipDir.Y * TravelCS.Y)));
+			WantWarp = FMath::Clamp(Angle, -Frame.MaxOrientationWarpDegrees, Frame.MaxOrientationWarpDegrees);
+		}
+		OrientationWarp += (WantWarp - OrientationWarp) * (1.0f - FMath::Exp(-DeltaSeconds / 0.15f));
+		if (Frame.bResetFootLocks)
+		{
+			OrientationWarp = WantWarp;
+		}
+		if (FMath::Abs(OrientationWarp) > 0.5f)
+		{
+			const FCompactPoseBoneIndex Spine = FindBone(Bones, TEXT("spine_01"));
+			FTransform SpineBefore = Spine != INDEX_NONE ? ComponentPose.GetComponentSpaceTransform(Spine) : FTransform::Identity;
+			FTransform PelvisT = ComponentPose.GetComponentSpaceTransform(Pelvis);
+			PelvisT.SetRotation((FQuat(FVector::UpVector, FMath::DegreesToRadians(OrientationWarp)) * PelvisT.GetRotation()).GetNormalized());
+			TArray<FBoneTransform, TInlineAllocator<1>> Turned;
+			Turned.Add(FBoneTransform(Pelvis, PelvisT));
+			ComponentPose.SafeSetCSBoneTransforms(Turned);
+			if (Spine != INDEX_NONE)
+			{
+				// The upper body keeps a quarter of the turn.
+				const FTransform SpineAfter = ComponentPose.GetComponentSpaceTransform(Spine);
+				SpineBefore.SetRotation((FQuat(FVector::UpVector, FMath::DegreesToRadians(0.25f * OrientationWarp)) * SpineBefore.GetRotation()).GetNormalized());
+				SpineBefore.SetLocation(SpineAfter.GetLocation());
+				TArray<FBoneTransform, TInlineAllocator<1>> Back;
+				Back.Add(FBoneTransform(Spine, SpineBefore));
+				ComponentPose.SafeSetCSBoneTransforms(Back);
+			}
+		}
+	}
 	const auto KneeAngle = [&ComponentPose, &Legs](const int32 Side)
 	{
 		const FVector H = ComponentPose.GetComponentSpaceTransform(Legs[Side][0]).GetLocation();
@@ -1307,7 +1376,8 @@ void FRammsCrowdAnimProxy::AdjustFeet(FCompactPose& Pose, const FBlendedCurve& C
 				const double Height = Ankle.Z;
 				if (Height > FlatAnkle && Swing > 0.0f)
 				{
-					const float HeightScale = FMath::Sqrt(FMath::Lerp(1.0f, LiftScale, Swing));
+					// Mildly: lowering the swinging foot takes the bend out of its knee.
+					const float HeightScale = FMath::Pow(FMath::Lerp(1.0f, LiftScale, Swing), 0.25f);
 					double NewHeight = FlatAnkle + (Height - FlatAnkle) * HeightScale;
 					const FVector Hip = ComponentPose.GetComponentSpaceTransform(Legs[Side][0]).GetLocation();
 					const FVector Knee = ComponentPose.GetComponentSpaceTransform(Legs[Side][1]).GetLocation();
@@ -1420,8 +1490,11 @@ void FRammsCrowdAnimProxy::AdjustFeet(FCompactPose& Pose, const FBlendedCurve& C
 				// Walking: the clip's feet already land about where the body goes, so a
 				// planted foot only holds against small drift and then gives way, keeping
 				// the clip's leg motion instead of straightening the leg.
-				const float Walking = FMath::SmoothStep(30.0f, 80.0f, static_cast<float>(Frame.AgentVelocity.Size2D()));
-				const float Hold = FMath::Lerp(UE_BIG_NUMBER, Set->WalkingFootLockMaxCm, Walking);
+				// Start and stop clips plant their feet deliberately: hold them (stepping if
+				// the body gets too far away) rather than slipping.
+				const float Walking = Frame.bFirmFootLock ? 0.0f : FMath::SmoothStep(30.0f, 80.0f, static_cast<float>(Frame.AgentVelocity.Size2D()));
+				// (Divided rather than interpolated from a huge number, which cancels to 0 in float.)
+				const float Hold = Set->WalkingFootLockMaxCm / FMath::Max(Walking, 1.0e-3f);
 				if (Walking > 0.0f && Distance > Hold)
 				{
 					Correction *= Hold / Distance;
@@ -1508,7 +1581,11 @@ void FRammsCrowdAnimProxy::AdjustFeet(FCompactPose& Pose, const FBlendedCurve& C
 		}
 		Drop = FMath::Max(Drop, Need);
 	}
-	Drop = Drop <= -UE_BIG_NUMBER * 0.5f ? 0.0f : FMath::Clamp(Drop, -3.5f, 5.0f);
+	// While walking, the hips don't dip: lowering them bends the other, nearly
+	// straight leg far more than it helps (near full extension a centimetre is ten
+	// degrees of knee). A held foot that is out of reach slips a little instead.
+	const float WalkingNow = Frame.bFirmFootLock ? 0.0f : FMath::SmoothStep(30.0f, 80.0f, static_cast<float>(Frame.AgentVelocity.Size2D()));
+	Drop = Drop <= -UE_BIG_NUMBER * 0.5f ? 0.0f : FMath::Clamp(Drop, -3.5f, FMath::Lerp(5.0f, 0.0f, WalkingNow));
 	const float DropRate = 0.08f;
 	PelvisDrop += (Drop - PelvisDrop) * (1.0f - FMath::Exp(-DeltaSeconds / DropRate));
 	if (Frame.bResetFootLocks)
@@ -1568,6 +1645,7 @@ void FRammsCrowdAnimProxy::AdjustFeet(FCompactPose& Pose, const FBlendedCurve& C
 		ComponentPose.SafeSetCSBoneTransforms(Changed);
 	}
 	FootDebug.Y = KneeAngle(0);
+
 	FCSPose<FCompactPose>::ConvertComponentPosesToLocalPosesSafe(ComponentPose, Pose);
 }
 

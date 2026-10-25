@@ -6,8 +6,13 @@ GASP's relaxed walk is captured on the UEFN mannequin. This script:
   1. copies the GASP pieces it needs into this project at their original paths
      (mannequin mesh and rigs, walk and idle clips, MetaHuman retarget rigs, the
      motion matching databases) - skip this if they are already here;
-  2. retargets the relaxed walk / idle / turn clips onto the City Sample crowd
-     body (RTG_UEFN_to_Metahuman_nrw) into CLIP_PATH;
+  2. retargets the clips those databases use onto the City Sample crowd body
+     into CLIP_PATH, with a copy of RTG_UEFN_to_Metahuman_nrw that copies the
+     leg joint rotations (FK) instead of re-solving the legs with IK. The IK
+     version kept the feet exactly on their source paths but re-bent the knees:
+     straighter at heel strike, more crouched in stance and stiffer in the swing.
+     FK keeps the captured knee and ankle motion; the feet then drift a centimetre
+     or so, which the runtime foot locking absorbs;
   3. copies GASP's relaxed walk databases onto the crowd skeleton, keeping their
      tuning (URammsCrowdMotionMatchingLibrary.adapt_pose_search_databases);
   4. fills the anim set's MotionMatching sets (Stand / TurnInPlace / Start / Move / Stop).
@@ -27,8 +32,10 @@ import unreal
 
 GASP_CONTENT = r"C:/Users/waemf/data/GameAnimationSample/Content"
 TARGET_MESH = "/Game/Fab/CitySampleCrowd/Character/Male/NormalWeight/Meshes/m_tal_nrw_base"
-CLIP_PATH = "/Game/CrowdMM/Anims"
-DATABASE_PATH = "/Game/CrowdMM/Databases"
+# FK-retargeted clips and their databases. (/Game/CrowdMM/Anims and /Databases held
+# an earlier IK-retargeted build and are no longer used.)
+CLIP_PATH = "/Game/CrowdMM/AnimsFK"
+DATABASE_PATH = "/Game/CrowdMM/DatabasesFK"
 ANIM_SET_PATH = "/Game/NPCs/DA_CrowdAnimSet"
 SAVE_ANIM_SET = True
 TAG = "[RammsCrowd motion matching] "
@@ -52,6 +59,10 @@ SETS = {
     "stop": ["PSD_Relaxed_Stand_Walk_Stops"],
 }
 RETARGETER = "/Game/MetaHumans/Common/Common/Rigs/RTG_UEFN_to_Metahuman_nrw"
+FK_RETARGETER = "/Game/CrowdMM/Rigs/RTG_UEFN_to_MH_FK"
+# Retarget ops that re-solve the limbs with IK; the FK copy turns them off.
+IK_OPS = ("IKRetargetOffsetGoalsController", "IKRetargetSpeedPlantingController",
+          "IKRetargetRunIKRigController", "IKRetargetAlignPoleVectorController")
 SOURCE_MESH = "/Game/Characters/UEFN_Mannequin/Meshes/SKM_UEFN_Mannequin"
 
 
@@ -70,16 +81,39 @@ def copy_gasp_content():
     registry.scan_paths_synchronous(["/Game/Characters", "/Game/MetaHumans"], True)
 
 
+def make_fk_retargeter():
+    """A copy of RETARGETER with the IK ops turned off (legs retargeted by FK)."""
+    if not unreal.EditorAssetLibrary.does_asset_exist(FK_RETARGETER):
+        unreal.EditorAssetLibrary.duplicate_asset(RETARGETER, FK_RETARGETER)
+    retargeter = unreal.load_asset(FK_RETARGETER)
+    controller = unreal.IKRetargeterController.get_controller(retargeter)
+    for index in range(controller.get_num_retarget_ops()):
+        op = controller.get_op_controller(index)
+        if op is not None and type(op).__name__ in IK_OPS:
+            controller.set_retarget_op_enabled(index, False)
+    unreal.EditorAssetLibrary.save_loaded_asset(retargeter, False)
+    return retargeter
+
+
+def source_clips():
+    """The animation sequences the SETS databases use."""
+    paths = set()
+    for group in SETS.values():
+        for name in group:
+            database = unreal.load_asset(SOURCE_DATABASES + name)
+            if database is None:
+                continue
+            for index in range(database.get_num_animation_assets()):
+                asset = database.get_animation_asset(index)
+                if isinstance(asset, unreal.AnimSequence):
+                    paths.add(asset.get_path_name().split(".")[0])
+    return [unreal.EditorAssetLibrary.find_asset_data(path) for path in sorted(paths)]
+
+
 def retarget_clips():
-    registry = unreal.AssetRegistryHelpers.get_asset_registry()
-    clips = []
-    for path in ["/Game/Characters/UEFN_Mannequin/Animations/Walk", "/Game/Characters/UEFN_Mannequin/Animations/Idle"]:
-        for data in registry.get_assets_by_path(path, False):
-            name = str(data.asset_name)
-            if str(data.asset_class_path.asset_name) == "AnimSequence" and "Relaxed" in name and "Pose_Lean" not in name:
-                clips.append(data)
+    clips = source_clips()
     made = unreal.IKRetargetBatchOperation.duplicate_and_retarget(
-        clips, unreal.load_asset(SOURCE_MESH), unreal.load_asset(TARGET_MESH), unreal.load_asset(RETARGETER),
+        clips, unreal.load_asset(SOURCE_MESH), unreal.load_asset(TARGET_MESH), make_fk_retargeter(),
         "", "", "", "_MH", CLIP_PATH, False, False, True)
     unreal.EditorAssetLibrary.save_directory(CLIP_PATH, only_if_is_dirty=True, recursive=True)
     unreal.log(TAG + "retargeted %d clips" % len(made))

@@ -101,11 +101,22 @@ layer on top unchanged.
 
 - **Content**: `Content/Python/ramms_crowd_build_motion_matching.py` builds it
   from a GASP project created from Fab. It copies the GASP pieces it needs,
-  retargets the relaxed walk, idle and turn clips onto the City Sample body, and
-  copies GASP's relaxed walk databases onto the crowd skeleton, keeping their
-  tuning
+  retargets the 57 clips the relaxed walk databases use onto the City Sample body,
+  and copies those databases onto the crowd skeleton, keeping their tuning
   (`URammsCrowdMotionMatchingLibrary::AdaptPoseSearchDatabases`). It then fills
   the anim set's `MotionMatching` sets.
+- **Retargeting legs by FK.** The retarget uses a copy of GASP's
+  `RTG_UEFN_to_Metahuman_nrw` with its IK ops turned off, so the leg joint
+  rotations are copied as captured. The IK version kept the feet exactly on their
+  source paths but re-bent the knees for the longer MetaHuman legs: straight at
+  heel strike, crouched in stance (median knee 35° against the capture's 29°) and
+  stiff in the swing (65° peak against 75°). With FK the feet drift a centimetre
+  or so per step, which foot locking absorbs.
+- **Orientation warping** (`MaxOrientationWarpDegrees`). Mass turns the body
+  after its velocity, so a clip walking straight ahead can be heading somewhere
+  the body isn't going. The hips and legs turn toward the direction of travel and
+  the spine turns most of the way back, so the steps go where the body goes
+  instead of the planted feet sliding sideways.
 - **Database sets** (`FRammsCrowdMotionDatabases`): `Stand`, `TurnInPlace`,
   `Start`, `Move` and `Stop`. Like GASP's chooser, only the set that fits the
   moment is searched, so costs from different schemas never compete. The set
@@ -133,10 +144,11 @@ motion-matched starts, stops and turns, and in standing pedestrians nudged by
 avoidance. Three things keep the feet honest, on both locomotion paths:
 
 - **Stride warping** (`bStrideWarping`, `MinStrideScale`..`MaxStrideScale`). The
-  difference between the agent's speed and the clip's is split: part is covered
-  by playback rate, the rest by lengthening or shortening the steps along the
-  direction of travel. Neither shows on its own. Faster than the clip is mostly
-  quicker steps, as people walk: longer steps would straighten the knees. The
+  difference between the agent's speed and the clip's is split: mostly playback
+  rate, the rest by lengthening or shortening the steps along the direction of
+  travel. Re-placing the feet changes how the knees bend (shorter steps bend the
+  leg reaching forward, longer ones straighten the trailing leg), so it is kept
+  small. The
   clip speed is the blend of all playing clips, and the scales are eased (0.2 s),
   so a newly matched clip never changes the legs in one frame.
 - **Foot lift scaling** (`bScaleFootLift`, `MinFootLiftScale`). Clips captured at
@@ -159,7 +171,9 @@ avoidance. Three things keep the feet honest, on both locomotion paths:
   - **Release:** at toe-off the foot eases back to the clip over the swing
     (`FootReleaseSeconds`), so the next step lands where the clip puts it.
   - **Walking:** while walking, a planted foot only holds against small drift
-    (`WalkingFootLockMaxCm`) and then gives way by that much. Holding on longer
+    (`WalkingFootLockMaxCm`, 6 cm) and then gives way by that much. Start and stop
+    clips plant their feet deliberately, so during them the feet hold firmly
+    (stepping if the body gets too far away). Holding on longer
     stretched the leg straight and ended the stance with a procedural step in
     place of the clip's swing, which looked robotic.
 - **Corrective steps.** If the body drifts more than `FootLockMaxDistanceCm` from
@@ -172,7 +186,9 @@ avoidance. Three things keep the feet honest, on both locomotion paths:
   nearly straight, where it would otherwise be noise). A pose the clip plays as
   captured is left exactly as captured, straight knees included. If a foot ends up
   beyond the leg's reach the hips dip (up to 5 cm, as a walker's do into a long
-  step) and the knee eases off full extension (soft IK) rather than snapping. If
+  step) and the knee eases off full extension (soft IK) rather than snapping.
+  While walking the hips don't dip: near full extension a centimetre of hip
+  height is ten degrees of knee on the other leg. If
   shorter steps bring the planted feet closer, the hips rise (up to 3.5 cm) so the
   knees keep the clip's bend instead of crouching.
 
