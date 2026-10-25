@@ -17,7 +17,7 @@ static TAutoConsoleVariable<bool> CVarDebugStimulus(
 	TEXT("ramms.crowd.DebugStimulus"), false,
 	TEXT("Draw crowd stimulus debug: proxemics rings around stimulus sources and zone-colored markers on reacting NPCs."));
 
-static ERammsStimulusZone ClassifyZone(const float Distance, const float ClosingSpeed, const FRammsStimulusFragment& Fragment,
+static ERammsStimulusZone ClassifyZone(const float Distance, const float ClosingSpeed, const float StimulusApproachSpeed, const FRammsStimulusFragment& Fragment,
 	const FRammsReactionParamsFragment& Params, const double Now)
 {
 	// Hysteresis: leaving a zone requires exceeding its radius by ExitHysteresis.
@@ -35,7 +35,10 @@ static ERammsStimulusZone ClassifyZone(const float Distance, const float Closing
 	ERammsStimulusZone Zone = ERammsStimulusZone::None;
 	if (Distance < Params.StartleRadiusCm)
 	{
-		Zone = ERammsStimulusZone::Startle;
+		// Close by, but a still (or receding) robot is not startling.
+		Zone = Params.bStartleOnlyWhenStimulusMoves && StimulusApproachSpeed < Params.StartleMinStimulusSpeedCmS
+			? ERammsStimulusZone::React
+			: ERammsStimulusZone::Startle;
 	}
 	else if (Distance < Params.ReactRadiusCm)
 	{
@@ -47,7 +50,8 @@ static ERammsStimulusZone ClassifyZone(const float Distance, const float Closing
 	}
 
 	// Fast approach startles inside the React zone (cooldown-gated below).
-	if (Zone == ERammsStimulusZone::React && ClosingSpeed > Params.StartleClosingSpeedCmS)
+	const float ApproachSpeed = Params.bStartleOnlyWhenStimulusMoves ? StimulusApproachSpeed : ClosingSpeed;
+	if (Zone == ERammsStimulusZone::React && ApproachSpeed > Params.StartleClosingSpeedCmS)
 	{
 		Zone = ERammsStimulusZone::Startle;
 	}
@@ -145,21 +149,24 @@ void URammsCrowdStimulusProcessor::Execute(FMassEntityManager& EntityManager, FM
 				const FVector RelativeVelocity = Nearest->Velocity - VelocityList[EntityIt].Value;
 				const FVector SeparationDir = CenterDistance > UE_KINDA_SMALL_NUMBER ? ToEntity / CenterDistance : FVector::ForwardVector;
 				const float ClosingSpeed = static_cast<float>(FVector::DotProduct(RelativeVelocity, SeparationDir));
+				const float StimulusApproachSpeed = static_cast<float>(FVector::DotProduct(Nearest->Velocity, SeparationDir));
 
 				Stimulus.StimulusEntity = Nearest->Entity;
 				Stimulus.StimulusLocation = Nearest->Location;
 				Stimulus.AwayDirection = FVector(SeparationDir.X, SeparationDir.Y, 0.0).GetSafeNormal2D(UE_KINDA_SMALL_NUMBER, FVector::ForwardVector);
 				Stimulus.Distance = SurfaceDistance;
 				Stimulus.ClosingSpeed = ClosingSpeed;
+				Stimulus.StimulusApproachSpeed = StimulusApproachSpeed;
 				Stimulus.Strength = FMath::Clamp(1.0f - SurfaceDistance / FMath::Max(Params.AwareRadiusCm, 1.0f), 0.0f, 1.0f) * Nearest->StrengthScale;
 
-				NewZone = UE::RammsCrowd::ClassifyZone(SurfaceDistance, ClosingSpeed, Stimulus, Params, Now);
+				NewZone = UE::RammsCrowd::ClassifyZone(SurfaceDistance, ClosingSpeed, StimulusApproachSpeed, Stimulus, Params, Now);
 			}
 			else
 			{
 				Stimulus.StimulusEntity = FMassEntityHandle();
 				Stimulus.Distance = FLT_MAX;
 				Stimulus.ClosingSpeed = 0.0f;
+				Stimulus.StimulusApproachSpeed = 0.0f;
 				Stimulus.Strength = 0.0f;
 			}
 

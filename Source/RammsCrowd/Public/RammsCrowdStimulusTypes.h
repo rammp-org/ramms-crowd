@@ -42,6 +42,9 @@ struct RAMMSCROWD_API FRammsStimulusFragment : public FMassFragment
 	/** Closing speed along the separation axis, cm/s. Positive = approaching. */
 	float ClosingSpeed = 0.0f;
 
+	/** Speed of the stimulus itself toward this entity, cm/s (its share of ClosingSpeed). Positive = coming at it. */
+	float StimulusApproachSpeed = 0.0f;
+
 	/** Normalized stimulus strength 0..1 (distance falloff x source strength scale). */
 	float Strength = 0.0f;
 
@@ -86,6 +89,19 @@ struct RAMMSCROWD_API FRammsReactionParamsFragment : public FMassConstSharedFrag
 	/** Approach speed (cm/s) that triggers a startle while inside the React zone. */
 	UPROPERTY(EditAnywhere, Category = "Startle", meta = (ClampMin = "0.0"))
 	float StartleClosingSpeedCmS = 150.0f;
+
+	/**
+	 * Only the stimulus coming at an NPC startles it: inside StartleRadiusCm the robot
+	 * must be moving toward it at StartleMinStimulusSpeedCmS or more, and the fast-approach
+	 * rule uses the robot's own approach speed. A person walking past (or toward) a
+	 * parked wheelchair is not startled by it. Off: the NPC's own motion counts too, and
+	 * anything inside StartleRadiusCm startles.
+	 */
+	UPROPERTY(EditAnywhere, Category = "Startle")
+	bool bStartleOnlyWhenStimulusMoves = true;
+
+	UPROPERTY(EditAnywhere, Category = "Startle", meta = (ClampMin = "0.0", EditCondition = "bStartleOnlyWhenStimulusMoves"))
+	float StartleMinStimulusSpeedCmS = 30.0f;
 
 	/** Minimum time between startle activations, s. */
 	UPROPERTY(EditAnywhere, Category = "Startle", meta = (ClampMin = "0.0"))

@@ -73,7 +73,7 @@ Animation Blueprint asset) that builds each pedestrian's pose from Mass data:
   `LookAtMaxPitchDegrees`) toward the robot's user; in the aware radius a share of
   them (`WatchRobotChance`) do. A Mass look-at target set by a StateTree takes
   precedence.
-- **Reactions.** A startle (the robot closing fast inside the startle radius) or a
+- **Reactions.** A startle (the robot coming at the pedestrian) or a
   bump (`URammsRobotClearanceProcessor` pushing the agent out of the footprint, counted
   in `FRammsRobotContactFragment`) plays an upper-body flinch from `Reactions`, with
   `ReactionCooldownSeconds` between them.
@@ -117,8 +117,14 @@ during packaging).
 ### Tuning reactions (no editor restart, no recompile)
 
 All proxemics live in `DA_Reaction_*` assets (`URammsCrowdReactionProfile`): zone radii,
-exit hysteresis, the closing-speed startle threshold, startle cooldown, back-away
-distance and speed scales. Edit between PIE runs; verify with
+exit hysteresis, the approach-speed startle threshold, whether only a moving robot
+startles (`bStartleOnlyWhenStimulusMoves`), startle cooldown, back-away distance and
+speed scales. How agents pass the robot (planning lookahead, comfort gap, keep-right,
+slowdown) lives on the RAMMS Player Avatar trait in `DA_MassConfig_PlayerAvatar`.
+
+![Pedestrians streaming past a parked chair, curving around it early and slowing alongside](images/crowd_passing.webp)
+
+![The chair driving through the crowd with and against the flow, forwards and in reverse](images/crowd_drive_grid.webp) Edit between PIE runs; verify with
 `ramms.crowd.DebugStimulus 1`.
 
 Walking speed/mix: Mass Movement trait (speed + variance), and the Stand duration in

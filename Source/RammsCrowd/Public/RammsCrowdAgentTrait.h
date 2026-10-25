@@ -16,8 +16,9 @@ struct FRammsCrowdMemberTag : public FMassTag
 };
 
 /**
- * Contact between a crowd member and a robot footprint, written by
- * URammsRobotClearanceProcessor and read by the animation layer (a bump reaction).
+ * A crowd member's dealings with robot footprints, kept by
+ * URammsRobotClearanceProcessor: contacts (read by the animation layer for a bump
+ * reaction) and the side of a planned pass.
  */
 USTRUCT()
 struct RAMMSCROWD_API FRammsRobotContactFragment : public FMassFragment
@@ -35,6 +36,10 @@ struct RAMMSCROWD_API FRammsRobotContactFragment : public FMassFragment
 	/** Whether the agent was in contact last frame. */
 	UPROPERTY()
 	bool bInContact = false;
+
+	/** Side the agent has committed to passing the robot on: +1 its right, -1 its left, 0 no pass planned. */
+	UPROPERTY()
+	int8 PassSide = 0;
 };
 
 /** Per-archetype crowd profile data shared by all entities of one kind. */
