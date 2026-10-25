@@ -91,6 +91,40 @@ the clips' "L" sync markers (gait phase; a clip without them counts as one cycle
 `IdleName`, `CarryName`) and its `LocomotionPlayRate`, `FootSpeedCmS` and
 `ReactionCount` for debugging.
 
+### Motion matching (experimental)
+
+Instead of blending the per-body walk and directional clips, the anim instance can
+pick locomotion by motion matching (UE Pose Search) against the Game Animation
+Sample's (GASP) relaxed walk: real starts, stops, turns in place and pivots
+instead of a walk blended to the agent's speed. Carry poses, reactions and look-at
+layer on top unchanged.
+
+- **Content**: `Content/Python/ramms_crowd_build_motion_matching.py` builds it
+  from a GASP project created from Fab. It copies the GASP pieces it needs,
+  retargets the relaxed walk, idle and turn clips onto the City Sample body, and
+  copies GASP's relaxed walk databases onto the crowd skeleton, keeping their
+  tuning
+  (`URammsCrowdMotionMatchingLibrary::AdaptPoseSearchDatabases`). It then fills
+  the anim set's `MotionMatching` sets.
+- **Database sets** (`FRammsCrowdMotionDatabases`): `Stand`, `TurnInPlace`,
+  `Start`, `Move` and `Stop`. Like GASP's chooser, only the set that fits the
+  moment is searched, so costs from different schemas never compete. The set
+  is chosen from the current speed and the predicted speed 1 s ahead.
+- **Prediction**: the path eases from the current velocity onto the lane Mass
+  is following (`TrajectoryResponseSeconds`), at its desired speed. It slows to
+  a stop when the pedestrian will stand at its goal, and the pedestrian turns to
+  face the direction it walks.
+- **Playback**: searches run every `MotionMatchingSearchInterval` and when the
+  set changes or a one-shot clip runs out. New clips cross-fade over
+  `MotionMatchingBlendSeconds`. Playback is scaled toward the agent's speed
+  within `MotionMatchingMinPlayRate`..`MotionMatchingMaxPlayRate`.
+- **Status**: off unless the sets are filled (`bUseMotionMatching` switches it
+  off without clearing them). Mass still moves the agents, so the feet slide more
+  than with the speed-matched blend. The next steps are stride and orientation
+  warping, and a mirror table for the crowd skeleton. Debug values on the
+  instance: `bMotionMatching`, `MotionPhase`, `MotionMatchedClip` and
+  `MotionMatchSwitches`.
+
 ### Fallback animation (`URammsCrowdAnimComponent` without an anim set)
 
 Without an `AnimSet` the component drives the mesh itself as a single node:

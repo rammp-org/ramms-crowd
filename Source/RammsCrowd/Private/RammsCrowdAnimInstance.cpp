@@ -11,7 +11,14 @@
 #include "Engine/SkeletalMesh.h"
 #include "Engine/StaticMesh.h"
 #include "Engine/World.h"
+#include "Animation/TrajectoryTypes.h"
 #include "GameFramework/Actor.h"
+#include "PoseSearch/PoseSearchDatabase.h"
+#include "PoseSearch/PoseSearchHistory.h"
+#include "PoseSearch/PoseSearchIndex.h"
+#include "PoseSearch/PoseSearchLibrary.h"
+#include "PoseSearch/PoseSearchResult.h"
+#include "PoseSearch/PoseSearchRole.h"
 #include "RammsCrowdAnimComponent.h"
 #include "RammsCrowdAnimSet.h"
 #include "RammsCrowdLog.h"
@@ -254,6 +261,321 @@ namespace
 	}
 }
 
+/** Per-pedestrian motion matching state: the pose history the search reads, the clips playing, and recent path. */
+struct FRammsCrowdMotionMatching
+{
+	struct FLayer
+	{
+		const UAnimSequence* Sequence = nullptr;
+		float Time = 0.0f;
+		float Weight = 0.0f;
+		bool bLooping = false;
+	};
+
+	struct FPastSample
+	{
+		double Time = 0.0;
+		FVector Position = FVector::ZeroVector;
+		FQuat Facing = FQuat::Identity;
+	};
+
+	enum class EPhase : uint8
+	{
+		Stand,
+		Start,
+		Move,
+		Stop,
+	};
+
+	UE::PoseSearch::FPoseHistory History;
+	bool bResetHistory = true;
+	EPhase Phase = EPhase::Stand;
+	float PhaseSeconds = 0.0f;
+	/** Playing clips, oldest first; the last is the current one, fading in over the others. */
+	TArray<FLayer, TInlineAllocator<4>> Layers;
+	float SinceSearch = UE_BIG_NUMBER;
+	double Clock = 0.0;
+	TArray<FPastSample> Past;
+
+	FRammsCrowdMotionMatching()
+	{
+		History.Initialize_AnyThread(/*NumPoses*/ 12, /*SamplingInterval*/ 0.04f);
+	}
+
+	void Reset()
+	{
+		bResetHistory = true;
+		Layers.Reset();
+		SinceSearch = UE_BIG_NUMBER;
+		Past.Reset();
+		Phase = EPhase::Stand;
+		PhaseSeconds = 0.0f;
+	}
+};
+
+namespace
+{
+	/** Ground speed of a clip's root motion around Time, cm/s. */
+	float ClipRootSpeed(const UAnimSequence* Sequence, const float Time)
+	{
+		const float Length = Sequence->GetPlayLength();
+		const float Start = FMath::Clamp(Time - 0.1f, 0.0f, Length);
+		const float End = FMath::Clamp(Time + 0.1f, 0.0f, Length);
+		if (End - Start < 0.02f)
+		{
+			return 0.0f;
+		}
+		const FTransform A = Sequence->ExtractRootTrackTransform(FAnimExtractContext(static_cast<double>(Start)), nullptr);
+		const FTransform B = Sequence->ExtractRootTrackTransform(FAnimExtractContext(static_cast<double>(End)), nullptr);
+		return static_cast<float>((B.GetLocation() - A.GetLocation()).Size2D() / (End - Start));
+	}
+
+	FQuat YawOnly(const FQuat& Rotation)
+	{
+		return FQuat(FVector::UpVector, FMath::DegreesToRadians(Rotation.Rotator().Yaw));
+	}
+}
+
+bool URammsCrowdAnimInstance::UpdateMotionMatching(const float DeltaSeconds)
+{
+	const URammsCrowdAnimComponent* Comp = Bridge.Get();
+	const USkeletalMeshComponent* Mesh = GetSkelMeshComponent();
+	if (Comp == nullptr || Mesh == nullptr || !AnimSet->bUseMotionMatching || AnimSet->MotionMatching.IsEmpty())
+	{
+		bMotionMatching = false;
+		return false;
+	}
+	if (!MotionMatching.IsValid())
+	{
+		MotionMatching = MakeShared<FRammsCrowdMotionMatching>();
+	}
+	FRammsCrowdMotionMatching& State = *MotionMatching;
+	State.Clock += DeltaSeconds;
+
+	// The path, in the frame the clips were captured in: the mesh component's yaw
+	// (City Sample bodies face +Y in component space, like the database clips).
+	const FTransform ComponentTransform = Mesh->GetComponentTransform();
+	const FVector Position = ComponentTransform.GetLocation();
+	const FQuat Facing = YawOnly(ComponentTransform.GetRotation());
+	const FQuat MeshToActor = Facing * YawOnly(Comp->GetOwner()->GetActorQuat()).Inverse();
+	State.Past.Add({ State.Clock, Position, Facing });
+	while (State.Past.Num() > 2 && State.Clock - State.Past[1].Time > 1.0)
+	{
+		State.Past.RemoveAt(0);
+	}
+
+	FTransformTrajectory Trajectory;
+	auto AddSample = [&Trajectory](const float Time, const FVector& At, const FQuat& Facing)
+	{
+		FTransformTrajectorySample& Sample = Trajectory.Samples.AddDefaulted_GetRef();
+		Sample.TimeInSeconds = Time;
+		Sample.Position = At;
+		Sample.Facing = Facing;
+	};
+	// History: interpolated from the recorded path.
+	for (int32 Step = 8; Step >= 1; --Step)
+	{
+		const double When = State.Clock - Step * 0.1;
+		int32 Next = 0;
+		while (Next < State.Past.Num() && State.Past[Next].Time < When)
+		{
+			++Next;
+		}
+		const FRammsCrowdMotionMatching::FPastSample& B = State.Past[FMath::Min(Next, State.Past.Num() - 1)];
+		const FRammsCrowdMotionMatching::FPastSample& A = State.Past[FMath::Max(Next - 1, 0)];
+		const float Alpha = B.Time > A.Time ? static_cast<float>(FMath::Clamp((When - A.Time) / (B.Time - A.Time), 0.0, 1.0)) : 0.0f;
+		AddSample(-Step * 0.1f, FMath::Lerp(A.Position, B.Position, Alpha), FQuat::Slerp(A.Facing, B.Facing, Alpha));
+	}
+	// Prediction: from the current velocity toward the path Mass is following, at its
+	// desired speed, slowing to a stop at a goal where the pedestrian will stand.
+	const float StandSpeed = AnimSet->MotionMatchingStandSpeedCmS;
+	FVector Velocity(Comp->MassVelocity.X, Comp->MassVelocity.Y, 0.0);
+	const float Speed0 = static_cast<float>(Velocity.Size2D());
+	FVector PathDirection = Comp->MassPathDirection.GetSafeNormal2D();
+	if (PathDirection.IsNearlyZero())
+	{
+		PathDirection = Speed0 > StandSpeed ? Velocity.GetSafeNormal2D() : Comp->GetOwner()->GetActorForwardVector().GetSafeNormal2D();
+	}
+	const float TargetSpeed = Comp->bMassIsMoving ? Comp->MassDesiredSpeed : 0.0f;
+	if (Speed0 < StandSpeed && TargetSpeed < StandSpeed)
+	{
+		// Shuffling under avoidance: treat as standing rather than walking in place.
+		Velocity = FVector::ZeroVector;
+	}
+	float Remaining = Comp->bMassStopsAtGoal ? Comp->MassDistanceToGoal : UE_BIG_NUMBER;
+	const float Tau = FMath::Max(AnimSet->TrajectoryResponseSeconds, 0.01f);
+	const float StepDecay = FMath::Exp(-0.1f / Tau);
+	float FacingYaw = static_cast<float>(Facing.Rotator().Yaw);
+	const float MeshYawOffset = static_cast<float>(MeshToActor.Rotator().Yaw);
+	FVector At = Position;
+	float Speed1 = Speed0;
+	AddSample(0.0f, Position, Facing);
+	for (int32 Step = 1; Step <= 12; ++Step)
+	{
+		const float Allowed = Comp->bMassStopsAtGoal ? FMath::Min(TargetSpeed, FMath::Sqrt(2.0f * 150.0f * FMath::Max(Remaining, 0.0f))) : TargetSpeed;
+		const FVector VelocityTarget = Allowed < StandSpeed ? FVector::ZeroVector : PathDirection * Allowed;
+		Velocity = VelocityTarget + (Velocity - VelocityTarget) * StepDecay;
+		At += Velocity * 0.1;
+		Remaining -= static_cast<float>(Velocity.Size2D()) * 0.1f;
+		if (Velocity.Size2D() > StandSpeed)
+		{
+			// Pedestrians turn to face where they walk.
+			const float Target = static_cast<float>(FMath::RadiansToDegrees(FMath::Atan2(Velocity.Y, Velocity.X))) + MeshYawOffset;
+			FacingYaw += FRotator3f::NormalizeAxis(Target - FacingYaw) * (1.0f - FMath::Exp(-0.1f / 0.25f));
+		}
+		if (Step == 10)
+		{
+			Speed1 = static_cast<float>(Velocity.Size2D());
+		}
+		AddSample(Step * 0.1f, At, FQuat(FVector::UpVector, FMath::DegreesToRadians(FacingYaw)));
+	}
+	State.History.SetTrajectory(Trajectory);
+
+	// What the pedestrian is doing picks the databases to search, like GASP's chooser.
+	using EPhase = FRammsCrowdMotionMatching::EPhase;
+	EPhase Want = EPhase::Move;
+	if (Speed0 < StandSpeed && Speed1 < StandSpeed)
+	{
+		Want = EPhase::Stand;
+	}
+	else if (Speed1 < StandSpeed)
+	{
+		Want = EPhase::Stop;
+	}
+	else if ((State.Phase == EPhase::Stand || State.Phase == EPhase::Start) && Speed0 < 0.7f * FMath::Max(Speed1, StandSpeed) && State.PhaseSeconds < 1.0f)
+	{
+		Want = EPhase::Start;
+	}
+	State.PhaseSeconds += DeltaSeconds;
+	bool bPhaseChanged = false;
+	if (Want != State.Phase && (State.PhaseSeconds > 0.25f || State.Phase == EPhase::Stand || Want == EPhase::Stop))
+	{
+		State.Phase = Want;
+		State.PhaseSeconds = 0.0f;
+		bPhaseChanged = true;
+	}
+	static const FName PhaseNames[] = { TEXT("Stand"), TEXT("Start"), TEXT("Move"), TEXT("Stop") };
+	MotionPhase = PhaseNames[static_cast<int32>(State.Phase)];
+	const FRammsCrowdMotionDatabases& Sets = AnimSet->MotionMatching;
+	TArray<const UObject*, TInlineAllocator<16>> Assets;
+	auto AddSet = [&Assets](const TArray<TObjectPtr<UPoseSearchDatabase>>& Databases)
+	{
+		for (const UPoseSearchDatabase* Database : Databases)
+		{
+			if (Database != nullptr)
+			{
+				Assets.Add(Database);
+			}
+		}
+	};
+	switch (State.Phase)
+	{
+	case EPhase::Stand:
+		AddSet(Sets.Stand);
+		// Turning on the spot only when the pedestrian has somewhere else to face.
+		if (FMath::Abs(FRotator3f::NormalizeAxis(FacingYaw - static_cast<float>(Facing.Rotator().Yaw))) > 30.0f || Assets.IsEmpty())
+		{
+			AddSet(Sets.TurnInPlace);
+		}
+		break;
+	case EPhase::Start: AddSet(Sets.Start); break;
+	case EPhase::Stop: AddSet(Sets.Stop); break;
+	default: break;
+	}
+	if (Assets.IsEmpty())
+	{
+		AddSet(Sets.Move);
+	}
+	// A clip that doesn't loop is about to run out: pick what follows it.
+	const bool bClipEnding = !State.Layers.IsEmpty() && !State.Layers.Last().bLooping
+		&& State.Layers.Last().Time >= State.Layers.Last().Sequence->GetPlayLength() - 0.15f;
+
+	// Search now and then (and as soon as the pose history has a pose in it).
+	State.SinceSearch += DeltaSeconds;
+	if (!State.History.IsEmpty() && (State.Layers.IsEmpty() || bPhaseChanged || bClipEnding || State.SinceSearch >= AnimSet->MotionMatchingSearchInterval))
+	{
+		State.SinceSearch = 0.0f;
+		FPoseSearchContinuingProperties Continuing;
+		if (!State.Layers.IsEmpty() && !bClipEnding)
+		{
+			Continuing.PlayingAsset = State.Layers.Last().Sequence;
+			Continuing.PlayingAssetAccumulatedTime = State.Layers.Last().Time;
+		}
+		const UObject* Contexts[] = { this };
+		const UE::PoseSearch::FRole Roles[] = { UE::PoseSearch::DefaultRole };
+		const UE::PoseSearch::IPoseHistory* Histories[] = { &State.History };
+		const UE::PoseSearch::FSearchResult Result = Assets.IsEmpty() ? UE::PoseSearch::FSearchResult()
+			: UPoseSearchLibrary::MotionMatch(Contexts, Roles, Histories, Assets, Continuing, FPoseSearchFutureProperties(), FPoseSearchEvent());
+		if (Result.IsValid() && !Result.bIsContinuingPoseSearch && Result.IsAssetTimeValid())
+		{
+			const UAnimSequence* Sequence = Cast<UAnimSequence>(Result.GetCurrentResultAnimationAsset());
+			const float Time = Result.GetAssetTime();
+			const bool bSameSpot = !State.Layers.IsEmpty() && State.Layers.Last().Sequence == Sequence && FMath::Abs(State.Layers.Last().Time - Time) < 0.2f;
+			if (Sequence != nullptr && !bSameSpot)
+			{
+				const UE::PoseSearch::FSearchIndexAsset* IndexAsset = Result.GetSearchIndexAsset();
+				if (State.Layers.Num() >= 4)
+				{
+					State.Layers.RemoveAt(0);
+				}
+				State.Layers.Add({ Sequence, Time, State.Layers.IsEmpty() ? 1.0f : 0.0f, IndexAsset != nullptr && IndexAsset->IsLooping() });
+				MotionMatchedClip = Sequence->GetFName();
+				++MotionMatchSwitches;
+			}
+		}
+	}
+	if (State.Layers.IsEmpty())
+	{
+		// Nothing selected yet (no pose recorded): use the blended clips this frame.
+		Frame.PoseHistory = &State.History;
+		Frame.bResetPoseHistory = State.bResetHistory;
+		State.bResetHistory = false;
+		bMotionMatching = false;
+		return false;
+	}
+
+	// Crossfade: the newest clip fades in, the older ones share what's left.
+	FRammsCrowdMotionMatching::FLayer& Current = State.Layers.Last();
+	const float BlendSeconds = AnimSet->MotionMatchingBlendSeconds;
+	Current.Weight = BlendSeconds > UE_KINDA_SMALL_NUMBER ? FMath::Min(1.0f, Current.Weight + DeltaSeconds / BlendSeconds) : 1.0f;
+	float Others = 0.0f;
+	for (int32 Index = 0; Index < State.Layers.Num() - 1; ++Index)
+	{
+		Others += State.Layers[Index].Weight;
+	}
+	for (int32 Index = State.Layers.Num() - 2; Index >= 0; --Index)
+	{
+		FRammsCrowdMotionMatching::FLayer& Layer = State.Layers[Index];
+		Layer.Weight = Others > UE_KINDA_SMALL_NUMBER ? Layer.Weight / Others * (1.0f - Current.Weight) : 0.0f;
+		if (Layer.Weight < 0.01f)
+		{
+			State.Layers.RemoveAt(Index);
+		}
+	}
+
+	// Play the clips at about the agent's speed so the feet keep up with the body.
+	const float RootSpeed = ClipRootSpeed(Current.Sequence, Current.Time);
+	const float AgentSpeed = Speed0;
+	LocomotionPlayRate = RootSpeed > 30.0f && AgentSpeed > 30.0f
+		? FMath::Clamp(AgentSpeed / RootSpeed, AnimSet->MotionMatchingMinPlayRate, FMath::Max(AnimSet->MotionMatchingMaxPlayRate, AnimSet->MotionMatchingMinPlayRate))
+		: 1.0f;
+	FootSpeedCmS = RootSpeed * LocomotionPlayRate;
+	for (FRammsCrowdMotionMatching::FLayer& Layer : State.Layers)
+	{
+		const float Length = Layer.Sequence->GetPlayLength();
+		Layer.Time += DeltaSeconds * LocomotionPlayRate;
+		Layer.Time = Layer.bLooping ? FMath::Fmod(Layer.Time, FMath::Max(Length, 0.01f)) : FMath::Min(Layer.Time, Length);
+		Frame.Locomotion.Add({ Layer.Sequence, Layer.Time, Layer.Weight });
+	}
+	Frame.LocomotionAlpha = 1.0f;
+	LocomotionAlpha = 1.0f;
+	Frame.PoseHistory = &State.History;
+	Frame.bResetPoseHistory = State.bResetHistory;
+	State.bResetHistory = false;
+	bMotionMatching = true;
+	return true;
+}
+
 FAnimInstanceProxy* URammsCrowdAnimInstance::CreateAnimInstanceProxy()
 {
 	return new FRammsCrowdAnimProxy(this);
@@ -492,6 +814,10 @@ void URammsCrowdAnimInstance::NativeUpdateAnimation(const float DeltaSeconds)
 		SmoothedSpeed = Comp->MassSpeed;
 		SmoothedDirection = Comp->DirectionAngleDegrees;
 		LookAlpha = 0.0f;
+		if (MotionMatching.IsValid())
+		{
+			MotionMatching->Reset();
+		}
 	}
 
 	const float SpeedAlpha = Smoothing(DeltaSeconds, AnimSet->SpeedSmoothingSeconds);
@@ -503,9 +829,13 @@ void URammsCrowdAnimInstance::NativeUpdateAnimation(const float DeltaSeconds)
 	}
 
 	Frame = FRammsCrowdAnimFrame();
-	UpdateLocomotion(DeltaSeconds, SmoothedSpeed, SmoothedDirection);
+	const bool bMotionMatched = UpdateMotionMatching(DeltaSeconds);
+	if (!bMotionMatched)
+	{
+		UpdateLocomotion(DeltaSeconds, SmoothedSpeed, SmoothedDirection);
+	}
 
-	if (IdleSequence != nullptr)
+	if (IdleSequence != nullptr && !bMotionMatched)
 	{
 		IdleTime = LoopTime(IdleSequence, IdleTime + DeltaSeconds);
 		Frame.Idle = { IdleSequence, IdleTime, 1.0f };
@@ -744,6 +1074,21 @@ bool FRammsCrowdAnimProxy::Evaluate(FPoseContext& Output)
 	{
 		Output.ResetToRefPose();
 		return true;
+	}
+
+	// Motion matching reads the recent body pose (feet, pelvis) from this history.
+	if (Frame.PoseHistory != nullptr)
+	{
+		FCSPose<FCompactPose> ComponentPose;
+		ComponentPose.InitPose(Output.Pose);
+		UE::PoseSearch::FComponentSpacePoseProvider Provider(ComponentPose);
+		const TArray<FBoneIndexType> NoRequiredBones;
+		Frame.PoseHistory->EvaluateComponentSpace_AnyThread(GetDeltaSeconds(), Provider, /*bStoreScales*/ false,
+			/*RootBoneRecoveryTime*/ 0.0f, 1.0f, 1.0f, Frame.bResetPoseHistory, /*bCacheBones*/ false, NoRequiredBones, Output.Curve, TConstArrayView<FName>()
+#if WITH_EDITORONLY_DATA
+			, GetComponentTransform()
+#endif
+		);
 	}
 
 	FBoneWeights Weights;

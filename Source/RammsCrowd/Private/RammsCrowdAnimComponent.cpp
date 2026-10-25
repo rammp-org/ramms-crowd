@@ -93,6 +93,7 @@ void URammsCrowdAnimComponent::TickComponent(const float DeltaTime, const ELevel
 	if (EntitySubsystem == nullptr || !CachedHandle.IsValid())
 	{
 		MassVelocity = FVector::ZeroVector;
+		MassDesiredVelocity = FVector::ZeroVector;
 		MassSpeed = 0.0f;
 		bMassIsMoving = false;
 		return;
@@ -102,6 +103,7 @@ void URammsCrowdAnimComponent::TickComponent(const float DeltaTime, const ELevel
 	if (!EntityManager.IsEntityValid(CachedHandle))
 	{
 		MassVelocity = FVector::ZeroVector;
+		MassDesiredVelocity = FVector::ZeroVector;
 		MassSpeed = 0.0f;
 		bMassIsMoving = false;
 		return;
@@ -112,9 +114,21 @@ void URammsCrowdAnimComponent::TickComponent(const float DeltaTime, const ELevel
 		MassVelocity = Velocity->Value;
 		MassSpeed = static_cast<float>(Velocity->Value.Size2D());
 	}
+	if (const FMassDesiredMovementFragment* Desired = EntityManager.GetFragmentDataPtr<FMassDesiredMovementFragment>(CachedHandle))
+	{
+		MassDesiredVelocity = Desired->DesiredVelocity;
+	}
+	else
+	{
+		MassDesiredVelocity = MassVelocity;
+	}
 	if (const FMassMoveTargetFragment* MoveTarget = EntityManager.GetFragmentDataPtr<FMassMoveTargetFragment>(CachedHandle))
 	{
 		bMassIsMoving = MoveTarget->GetCurrentAction() == EMassMovementAction::Move;
+		MassPathDirection = MoveTarget->Forward.GetSafeNormal2D();
+		MassDesiredSpeed = bMassIsMoving ? MoveTarget->DesiredSpeed.Get() : 0.0f;
+		MassDistanceToGoal = MoveTarget->DistanceToGoal;
+		bMassStopsAtGoal = MoveTarget->IntentAtGoal == EMassMovementAction::Stand;
 	}
 	if (const FRammsCrowdProfileParameters* Profile = EntityManager.GetConstSharedFragmentDataPtr<FRammsCrowdProfileParameters>(CachedHandle))
 	{

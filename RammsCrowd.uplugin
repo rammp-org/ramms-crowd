@@ -59,6 +59,10 @@
 		{
 			"Name": "AnimationWarping",
 			"Enabled": true
+		},
+		{
+			"Name": "PoseSearch",
+			"Enabled": true
 		}
 	]
 }

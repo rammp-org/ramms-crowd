@@ -30,6 +30,7 @@ public class RammsCrowdEditor : ModuleRules
 			"MassEntity",
 			"MassCommon",
 			"MassMovement",
+			"PoseSearch",
 			"PropertyBindingUtils",
 			"RammsCrowd",
 			"RammsCrowdUncooked",

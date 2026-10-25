@@ -39,6 +39,24 @@ public:
 	UPROPERTY(BlueprintReadOnly, Category = "Ramms|Crowd")
 	FVector MassVelocity = FVector::ZeroVector;
 
+	/** The velocity Mass is steering toward (path following, avoidance), cm/s; where the pedestrian is about to go. */
+	UPROPERTY(BlueprintReadOnly, Category = "Ramms|Crowd")
+	FVector MassDesiredVelocity = FVector::ZeroVector;
+
+	/** Where the pedestrian's path heads next (unit, 2D), the speed it wants on it, cm/s, and how far its current goal is, cm. */
+	UPROPERTY(BlueprintReadOnly, Category = "Ramms|Crowd")
+	FVector MassPathDirection = FVector::ZeroVector;
+
+	UPROPERTY(BlueprintReadOnly, Category = "Ramms|Crowd")
+	float MassDesiredSpeed = 0.0f;
+
+	UPROPERTY(BlueprintReadOnly, Category = "Ramms|Crowd")
+	float MassDistanceToGoal = 0.0f;
+
+	/** True when the pedestrian means to stand once it reaches its goal. */
+	UPROPERTY(BlueprintReadOnly, Category = "Ramms|Crowd")
+	bool bMassStopsAtGoal = false;
+
 	/** 2D speed, cm/s — feed the walk blendspace with this. */
 	UPROPERTY(BlueprintReadOnly, Category = "Ramms|Crowd")
 	float MassSpeed = 0.0f;

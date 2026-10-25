@@ -7,6 +7,7 @@
 #include "RammsCrowdAnimSet.generated.h"
 
 class UAnimSequence;
+class UPoseSearchDatabase;
 class UStaticMesh;
 
 /** One looping locomotion clip and the ground motion it was authored with. */
@@ -99,6 +100,39 @@ struct RAMMSCROWD_API FRammsCrowdBodyAnims
 };
 
 /**
+ * Pose search databases for crowd motion matching, by what the pedestrian is doing.
+ * Searching only the set that fits the moment (as the Game Animation Sample's
+ * chooser does) keeps costs from different schemas from competing.
+ */
+USTRUCT(BlueprintType)
+struct RAMMSCROWD_API FRammsCrowdMotionDatabases
+{
+	GENERATED_BODY()
+
+	/** Standing: idles. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Ramms|Crowd")
+	TArray<TObjectPtr<UPoseSearchDatabase>> Stand;
+
+	/** Standing but turning to face somewhere else: turns in place (searched with Stand). */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Ramms|Crowd")
+	TArray<TObjectPtr<UPoseSearchDatabase>> TurnInPlace;
+
+	/** Setting off from standing. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Ramms|Crowd")
+	TArray<TObjectPtr<UPoseSearchDatabase>> Start;
+
+	/** Walking: loops, turns, pivots. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Ramms|Crowd")
+	TArray<TObjectPtr<UPoseSearchDatabase>> Move;
+
+	/** Coming to a stop. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Ramms|Crowd")
+	TArray<TObjectPtr<UPoseSearchDatabase>> Stop;
+
+	bool IsEmpty() const { return Stand.IsEmpty() && TurnInPlace.IsEmpty() && Start.IsEmpty() && Move.IsEmpty() && Stop.IsEmpty(); }
+};
+
+/**
  * Animation content for URammsCrowdAnimInstance: per-body walks, idles and carry
  * styles, shared directional walks and reactions, and the tuning that turns Mass
  * movement into a pose. Built for the City Sample crowd by
@@ -176,6 +210,44 @@ public:
 
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Ramms|Crowd|Look At", meta = (ClampMin = "0.01"))
 	float LookAtBlendSeconds = 0.35f;
+
+	/**
+	 * Motion matching (experimental): when set, locomotion comes from searching pose
+	 * search databases (built on the crowd skeleton) for the clip and frame that best
+	 * continue the current pose along the pedestrian's predicted path, instead of
+	 * blending the per-body walk and directional clips. Starts, stops, turns and
+	 * pivots then come from captured motion. Carry, reactions and look-at layer on
+	 * top as before. See Content/Python/ramms_crowd_build_motion_matching.py.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Ramms|Crowd|Motion Matching")
+	FRammsCrowdMotionDatabases MotionMatching;
+
+	/** Switch motion matching off without clearing the databases. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Ramms|Crowd|Motion Matching")
+	bool bUseMotionMatching = true;
+
+	/** Below this speed (now and over the predicted path) a pedestrian counts as standing, cm/s. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Ramms|Crowd|Motion Matching", meta = (ClampMin = "0.0"))
+	float MotionMatchingStandSpeedCmS = 25.0f;
+
+	/** Seconds between searches (the current clip keeps playing in between). */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Ramms|Crowd|Motion Matching", meta = (ClampMin = "0.0"))
+	float MotionMatchingSearchInterval = 0.1f;
+
+	/** Crossfade into a newly selected clip, seconds. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Ramms|Crowd|Motion Matching", meta = (ClampMin = "0.0"))
+	float MotionMatchingBlendSeconds = 0.25f;
+
+	/** How quickly the predicted path bends from the current velocity to Mass's desired velocity, seconds. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Ramms|Crowd|Motion Matching", meta = (ClampMin = "0.01"))
+	float TrajectoryResponseSeconds = 0.35f;
+
+	/** Clip playback is scaled toward the agent's speed within this range, so the feet keep up without obvious slow motion. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Ramms|Crowd|Motion Matching", meta = (ClampMin = "0.1"))
+	float MotionMatchingMinPlayRate = 0.7f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Ramms|Crowd|Motion Matching", meta = (ClampMin = "0.1"))
+	float MotionMatchingMaxPlayRate = 1.2f;
 
 	/** Seconds before the same pedestrian can react again. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Ramms|Crowd|Reactions", meta = (ClampMin = "0.0"))

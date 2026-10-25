@@ -12,6 +12,12 @@ class URammsCrowdAnimComponent;
 class URammsCrowdAnimSet;
 struct FRammsCrowdBodyAnims;
 struct FRammsCrowdCarryStyle;
+struct FRammsCrowdMotionMatching;
+
+namespace UE::PoseSearch
+{
+	struct FPoseHistory;
+}
 
 namespace RammsCrowdAnim
 {
@@ -68,6 +74,9 @@ struct FRammsCrowdAnimFrame
 	float LookYawDegrees = 0.0f;
 	float LookPitchDegrees = 0.0f;
 	float LookAlpha = 0.0f;
+	/** Motion matching: the pose history to record the finished pose into (owned by the instance). */
+	UE::PoseSearch::FPoseHistory* PoseHistory = nullptr;
+	bool bResetPoseHistory = false;
 };
 
 /**
@@ -125,6 +134,20 @@ public:
 	UPROPERTY(BlueprintReadOnly, Category = "Ramms|Crowd")
 	int32 ReactionCount = 0;
 
+	/** Motion matching: whether it drives locomotion, the clip it last selected, and how many clips it has switched to. */
+	UPROPERTY(BlueprintReadOnly, Category = "Ramms|Crowd|Motion Matching")
+	bool bMotionMatching = false;
+
+	UPROPERTY(BlueprintReadOnly, Category = "Ramms|Crowd|Motion Matching")
+	FName MotionMatchedClip;
+
+	/** Stand, Start, Move or Stop: which databases are being searched. */
+	UPROPERTY(BlueprintReadOnly, Category = "Ramms|Crowd|Motion Matching")
+	FName MotionPhase;
+
+	UPROPERTY(BlueprintReadOnly, Category = "Ramms|Crowd|Motion Matching")
+	int32 MotionMatchSwitches = 0;
+
 	/** Plays a reaction now (ignores the cooldown). */
 	UFUNCTION(BlueprintCallable, Category = "Ramms|Crowd")
 	void PlayReaction();
@@ -146,6 +169,8 @@ private:
 	void SelectStyle(uint32 Seed);
 	void ApplyAccessory(const FRammsCrowdCarryStyle* Style, int32 PropIndex);
 	void UpdateLocomotion(float DeltaSeconds, float Speed, float DirectionDegrees);
+	/** Motion-matched locomotion into Frame; false when motion matching isn't available (falls back to the blended clips). */
+	bool UpdateMotionMatching(float DeltaSeconds);
 	void UpdateReaction(float DeltaSeconds);
 	void UpdateLookAt(float DeltaSeconds);
 	void StartReaction();
@@ -184,6 +209,8 @@ private:
 	float LookAlpha = 0.0f;
 
 	FRammsCrowdAnimFrame Frame;
+
+	TSharedPtr<FRammsCrowdMotionMatching> MotionMatching;
 
 	friend struct FRammsCrowdAnimProxy;
 };
