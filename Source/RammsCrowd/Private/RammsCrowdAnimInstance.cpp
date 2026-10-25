@@ -623,6 +623,9 @@ bool URammsCrowdAnimInstance::UpdateMotionMatching(const float DeltaSeconds)
 		}
 	}
 	FootSpeedCmS = RootSpeed * LocomotionPlayRate * StrideScale;
+	FootLiftScale = AnimSet->bScaleFootLift && RootSpeed > 30.0f && AgentSpeed > 1.0f
+		? FMath::Clamp(AgentSpeed / RootSpeed, AnimSet->MinFootLiftScale, 1.0f)
+		: 1.0f;
 
 	// Distance matching for stops: play the stop clip so that the distance its root
 	// still travels equals the distance Mass has left to the goal, so the feet come to
@@ -928,6 +931,7 @@ void URammsCrowdAnimInstance::NativeUpdateAnimation(const float DeltaSeconds)
 
 	Frame = FRammsCrowdAnimFrame();
 	StrideScale = 1.0f;
+	FootLiftScale = 1.0f;
 	const bool bMotionMatched = UpdateMotionMatching(DeltaSeconds);
 	if (!bMotionMatched)
 	{
@@ -949,6 +953,7 @@ void URammsCrowdAnimInstance::NativeUpdateAnimation(const float DeltaSeconds)
 
 	Frame.bLockFeet = AnimSet->bLockPlantedFeet;
 	Frame.StrideScale = LocomotionAlpha > 0.0f ? FMath::Lerp(1.0f, StrideScale, LocomotionAlpha) : 1.0f;
+	Frame.FootLiftScale = LocomotionAlpha > 0.0f ? FMath::Lerp(1.0f, FootLiftScale, LocomotionAlpha) : 1.0f;
 	Frame.AgentVelocity = Comp->MassVelocity;
 	Frame.bResetFootLocks = bPendingFootReset;
 	bPendingFootReset = false;
@@ -1007,6 +1012,9 @@ void URammsCrowdAnimInstance::UpdateLocomotion(const float DeltaSeconds, const f
 		? FMath::Clamp(Speed / (ClipSpeed * LocomotionPlayRate), AnimSet->MinStrideScale, FMath::Max(AnimSet->MaxStrideScale, AnimSet->MinStrideScale))
 		: 1.0f;
 	FootSpeedCmS = LocomotionAlpha > 0.0f ? ClipSpeed * LocomotionPlayRate * StrideScale : 0.0f;
+	FootLiftScale = AnimSet->bScaleFootLift && ClipSpeed > 30.0f && Speed > 1.0f
+		? FMath::Clamp(Speed / ClipSpeed, AnimSet->MinFootLiftScale, 1.0f)
+		: 1.0f;
 
 	if (LocomotionAlpha > 0.0f)
 	{
@@ -1216,6 +1224,9 @@ void FRammsCrowdAnimProxy::AdjustFeet(FCompactPose& Pose, const FBlendedCurve& C
 		RefComponentPose.InitPose(RefPose);
 		RefAnkleHeight = static_cast<float>(RefComponentPose.GetComponentSpaceTransform(Legs[0][2]).GetLocation().Z);
 		RefBallHeight = static_cast<float>(RefComponentPose.GetComponentSpaceTransform(Legs[0][3]).GetLocation().Z);
+		const FVector RefAnkle = RefComponentPose.GetComponentSpaceTransform(Legs[0][2]).GetLocation();
+		const FVector RefBall = RefComponentPose.GetComponentSpaceTransform(Legs[0][3]).GetLocation();
+		RefFootPitch = static_cast<float>(FMath::RadiansToDegrees(FMath::Atan2(RefBall.Z - RefAnkle.Z, FVector::Dist2D(RefBall, RefAnkle))));
 	}
 
 	FCSPose<FCompactPose> ComponentPose;
@@ -1233,6 +1244,45 @@ void FRammsCrowdAnimProxy::AdjustFeet(FCompactPose& Pose, const FBlendedCurve& C
 			const FVector FootAt = ComponentPose.GetComponentSpaceTransform(Legs[Side][2]).GetLocation();
 			const double Along = FVector::DotProduct(FootAt - Hips, Direction);
 			PlaceFoot(ComponentPose, Legs[Side][0], Legs[Side][1], Legs[Side][2], FootAt + Direction * (Along * (Stride - 1.0f)));
+		}
+	}
+
+	// Foot lift scaling: pull the foot's height and heel / toe rotation toward flat for a
+	// pedestrian walking slower than the clip, as a slow walk lifts the feet less.
+	const float LiftScale = Frame.FootLiftScale;
+	if (LiftScale < 0.99f)
+	{
+		// Flat stance, measured on the clips: the ankle sits ~1.5 cm higher and the foot
+		// ~5 degrees more toe-down than the bind pose.
+		const float FlatAnkle = RefAnkleHeight + 1.5f;
+		const float FlatPitch = RefFootPitch - 5.0f;
+		for (int32 Side = 0; Side < 2; ++Side)
+		{
+			FTransform FootT = ComponentPose.GetComponentSpaceTransform(Legs[Side][2]);
+			const FVector Ankle = FootT.GetLocation();
+			const FVector Ball = ComponentPose.GetComponentSpaceTransform(Legs[Side][3]).GetLocation();
+			const FVector Along = FVector(Ball.X - Ankle.X, Ball.Y - Ankle.Y, 0.0).GetSafeNormal();
+			if (Along.IsNearlyZero())
+			{
+				continue;
+			}
+			const float Pitch = static_cast<float>(FMath::RadiansToDegrees(FMath::Atan2(Ball.Z - Ankle.Z, FVector::Dist2D(Ball, Ankle))));
+			const float NewPitch = FlatPitch + (Pitch - FlatPitch) * LiftScale;
+			// Rotate about the foot's sideways axis (Along x Up: a positive angle lifts the toe).
+			const FVector Sideways = FVector::CrossProduct(Along, FVector::UpVector).GetSafeNormal();
+			const FQuat Turn(Sideways, FMath::DegreesToRadians(NewPitch - Pitch));
+			FootT.SetRotation((Turn * FootT.GetRotation()).GetNormalized());
+			const float Height = static_cast<float>(Ankle.Z);
+			const float NewHeight = Height > FlatAnkle ? FlatAnkle + (Height - FlatAnkle) * LiftScale : Height;
+			const FVector Target(Ankle.X, Ankle.Y, NewHeight);
+			// Rotation first (the IK keeps it), then reach the lowered ankle.
+			TArray<FBoneTransform, TInlineAllocator<1>> Rotated;
+			Rotated.Add(FBoneTransform(Legs[Side][2], FootT));
+			ComponentPose.SafeSetCSBoneTransforms(Rotated);
+			if (FMath::Abs(NewHeight - Height) > 0.05f)
+			{
+				PlaceFoot(ComponentPose, Legs[Side][0], Legs[Side][1], Legs[Side][2], Target);
+			}
 		}
 	}
 
@@ -1352,7 +1402,7 @@ void FRammsCrowdAnimProxy::AdjustFeet(FCompactPose& Pose, const FBlendedCurve& C
 			else if (Lock.StepTime < 0.0f && Lock.Alpha > 0.0f)
 			{
 				// In the swing: hand the foot back to the clip smoothly.
-				Lock.Alpha = FMath::Max(0.0f, Lock.Alpha - DeltaSeconds / 0.25f);
+				Lock.Alpha = FMath::Max(0.0f, Lock.Alpha - DeltaSeconds / 0.4f);
 			}
 		}
 		if (Lock.bLocked)

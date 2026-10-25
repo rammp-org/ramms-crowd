@@ -190,6 +190,18 @@ public:
 	float MaxStrideScale = 1.25f;
 
 	/**
+	 * Foot lift scaling: a slow walker lifts and rotates its feet less than the fast
+	 * walk the clip was captured at. Below the clip's speed, the foot's height above
+	 * the ground and its heel-rise / toe-lift rotation are scaled toward flat by the
+	 * speed ratio (not below MinFootLiftScale).
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Ramms|Crowd|Locomotion")
+	bool bScaleFootLift = true;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Ramms|Crowd|Locomotion", meta = (ClampMin = "0.1", ClampMax = "1.0"))
+	float MinFootLiftScale = 0.45f;
+
+	/**
 	 * Foot locking: when the animation plants a foot, keep it where it touched down in
 	 * the world and bend the leg (two-bone IK) to reach it until the clip lifts the
 	 * foot again. The pinned point rolls heel to ball like a real step. Contact comes

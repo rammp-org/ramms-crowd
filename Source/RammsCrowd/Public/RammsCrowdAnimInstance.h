@@ -83,6 +83,8 @@ struct FRammsCrowdAnimFrame
 	/** Stride warping: step length scale along the agent's velocity (world, cm/s). */
 	float StrideScale = 1.0f;
 	FVector AgentVelocity = FVector::ZeroVector;
+	/** Foot lift / rotation scale (1 = as captured). */
+	float FootLiftScale = 1.0f;
 };
 
 /**
@@ -168,6 +170,10 @@ public:
 	/** How many feet took their contact from the clip's contact curves last frame (0..2; else foot heights). */
 	UPROPERTY(BlueprintReadOnly, Category = "Ramms|Crowd")
 	int32 FootContactFromCurves = 0;
+
+	/** Foot lift and heel / toe rotation scale applied last frame (1 = as captured). */
+	UPROPERTY(BlueprintReadOnly, Category = "Ramms|Crowd")
+	float FootLiftScale = 1.0f;
 
 	/** Step length scale applied last frame (stride warping; 1 = as captured). */
 	UPROPERTY(BlueprintReadOnly, Category = "Ramms|Crowd")
@@ -281,4 +287,6 @@ private:
 	int32 FootContactFromCurves = 0;
 	float RefAnkleHeight = 0.0f;
 	float RefBallHeight = 0.0f;
+	/** Pitch of the ankle-to-ball line in the reference pose, degrees (negative: ball below ankle). */
+	float RefFootPitch = 0.0f;
 };

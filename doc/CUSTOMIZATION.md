@@ -136,6 +136,11 @@ avoidance. Three things keep the feet honest, on both locomotion paths:
   difference between the agent's speed and the clip's is split: part is covered
   by playback rate, the rest by lengthening or shortening the steps along the
   direction of travel (legs re-solved with IK). Neither shows on its own.
+- **Foot lift scaling** (`bScaleFootLift`, `MinFootLiftScale`). Clips captured at
+  a brisk walk (GASP's is 165 cm/s) lift the toe and raise the heel far more than
+  a slower walker would. Below the clip's speed, the foot's height above the
+  ground and its heel-rise / toe-lift rotation are scaled toward a flat foot by the
+  speed ratio.
 - **Foot locking with heel-to-toe roll** (`bLockPlantedFeet`).
   - **Contact:** comes from the clips' `contact_l` / `contact_r` curves when they
     have them (GASP clips do: heel strike to toe-off). Otherwise it comes from foot
@@ -163,7 +168,7 @@ Motion matching adds two stop-specific pieces:
 The motion-matching pose history records the clip's own feet, before warping and
 locking, because that is what the search compares against.
 
-Debug values on the instance: `StrideScale`, `LockedFeet`, `FootLockCorrectionCm`,
+Debug values on the instance: `StrideScale`, `FootLiftScale`, `LockedFeet`, `FootLockCorrectionCm`,
 `FootLockOverstretches` (the number of steps taken) and `FootContactFromCurves`.
 
 ### Fallback animation (`URammsCrowdAnimComponent` without an anim set)
