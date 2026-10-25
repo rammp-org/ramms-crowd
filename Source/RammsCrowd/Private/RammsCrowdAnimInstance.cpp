@@ -22,6 +22,7 @@
 #include "RammsCrowdAnimComponent.h"
 #include "RammsCrowdAnimSet.h"
 #include "RammsCrowdLog.h"
+#include "RammsSeatedPoseAnimInstance.h"
 
 namespace RammsCrowdAnim
 {
@@ -810,6 +811,7 @@ void URammsCrowdAnimInstance::NativeUpdateAnimation(const float DeltaSeconds)
 			? HashCombine(GetTypeHash(Entity.Index), GetTypeHash(Entity.SerialNumber))
 			: GetTypeHash(GetOwningActor());
 		SelectStyle(Seed);
+		bPendingFootReset = true;
 		// New entity: snap the filters instead of easing in from the previous one's state.
 		SmoothedSpeed = Comp->MassSpeed;
 		SmoothedDirection = Comp->DirectionAngleDegrees;
@@ -847,6 +849,10 @@ void URammsCrowdAnimInstance::NativeUpdateAnimation(const float DeltaSeconds)
 		Frame.CarryLeftArm = CarryLeft;
 		Frame.CarryRightArm = CarryRight;
 	}
+
+	Frame.bLockFeet = AnimSet->bLockPlantedFeet;
+	Frame.bResetFootLocks = bPendingFootReset;
+	bPendingFootReset = false;
 
 	UpdateReaction(DeltaSeconds);
 	UpdateLookAt(DeltaSeconds);
@@ -1021,10 +1027,157 @@ void URammsCrowdAnimInstance::UpdateLookAt(const float DeltaSeconds)
 void FRammsCrowdAnimProxy::PreUpdate(UAnimInstance* InAnimInstance, const float DeltaSeconds)
 {
 	FAnimInstanceProxy::PreUpdate(InAnimInstance, DeltaSeconds);
-	if (const URammsCrowdAnimInstance* Instance = Cast<URammsCrowdAnimInstance>(InAnimInstance))
+	if (URammsCrowdAnimInstance* Instance = Cast<URammsCrowdAnimInstance>(InAnimInstance))
 	{
 		Frame = Instance->Frame;
+		// Results of the previous evaluation, for debugging.
+		Instance->LockedFeet = LockedFeet;
+		Instance->FootLockCorrectionCm = FootLockCorrection;
+		Instance->FootLockOverstretches = FootLockOverstretches;
 	}
+}
+
+void FRammsCrowdAnimProxy::LockFeet(FCompactPose& Pose)
+{
+	if (Frame.bResetFootLocks)
+	{
+		FootLocks[0] = FootLocks[1] = FFootLock();
+	}
+	const URammsCrowdAnimInstance* Instance = Cast<URammsCrowdAnimInstance>(GetAnimInstanceObject());
+	const URammsCrowdAnimSet* Set = Instance != nullptr ? Instance->AnimSet.Get() : nullptr;
+	if (Set == nullptr)
+	{
+		return;
+	}
+	const FBoneContainer& Bones = Pose.GetBoneContainer();
+	auto Find = [&Bones](const TCHAR* Name)
+	{
+		const int32 MeshIndex = Bones.GetPoseBoneIndexForBoneName(FName(Name));
+		return MeshIndex == INDEX_NONE ? FCompactPoseBoneIndex(INDEX_NONE) : Bones.MakeCompactPoseIndex(FMeshPoseBoneIndex(MeshIndex));
+	};
+	static const TCHAR* Chains[2][4] = {
+		{ TEXT("thigh_l"), TEXT("calf_l"), TEXT("foot_l"), TEXT("ball_l") },
+		{ TEXT("thigh_r"), TEXT("calf_r"), TEXT("foot_r"), TEXT("ball_r") },
+	};
+	const float DeltaSeconds = FMath::Max(GetDeltaSeconds(), UE_KINDA_SMALL_NUMBER);
+	const FTransform& ComponentToWorld = GetComponentTransform();
+	const float PlantHeight = Set->FootPlantHeightCm;
+	const float FootStepSeconds = FMath::Max(Set->FootStepSeconds, 0.05f);
+	const float FootStepHeightCm = Set->FootStepHeightCm;
+	const float ReleaseHeight = PlantHeight + 4.0f;
+
+	FCSPose<FCompactPose> ComponentPose;
+	ComponentPose.InitPose(Pose);
+	TArray<FBoneTransform, TInlineAllocator<6>> Changed;
+	int32 NumLocked = 0;
+	FootLockCorrection = 0.0f;
+	for (int32 Side = 0; Side < 2; ++Side)
+	{
+		const FCompactPoseBoneIndex Thigh = Find(Chains[Side][0]);
+		const FCompactPoseBoneIndex Calf = Find(Chains[Side][1]);
+		const FCompactPoseBoneIndex Foot = Find(Chains[Side][2]);
+		const FCompactPoseBoneIndex Ball = Find(Chains[Side][3]);
+		FFootLock& Lock = FootLocks[Side];
+		if (Thigh == INDEX_NONE || Calf == INDEX_NONE || Foot == INDEX_NONE || Ball == INDEX_NONE)
+		{
+			Lock = FFootLock();
+			continue;
+		}
+		const FVector BallCS = ComponentPose.GetComponentSpaceTransform(Ball).GetLocation();
+		const FVector BallWorld = ComponentToWorld.TransformPosition(BallCS);
+
+		const bool bAnimPlanted = BallCS.Z < PlantHeight;
+		const FFootLock& Other = FootLocks[1 - Side];
+		float Lift = 0.0f;
+		if (Lock.StepTime >= 0.0f)
+		{
+			// A procedural step: the foot lifts and swings from where it was pinned back
+			// under the body, then plants again if the clip still has it down.
+			Lock.StepTime += DeltaSeconds / FootStepSeconds;
+			const float T = FMath::Min(Lock.StepTime, 1.0f);
+			Lock.Offset = Lock.StepFrom * (1.0f - FMath::SmoothStep(0.0f, 1.0f, T));
+			Lock.Alpha = 1.0f;
+			Lift = FMath::Sin(T * UE_PI) * FootStepHeightCm;
+			if (Lock.StepTime >= 1.0f)
+			{
+				Lock.StepTime = -1.0f;
+				Lock.Offset = FVector::ZeroVector;
+				Lock.bLocked = bAnimPlanted;
+				Lock.LockedWorld = BallWorld;
+			}
+		}
+		else
+		{
+			// The clip plants the foot when the ball is down; lift-off releases it.
+			if (!Lock.bLocked && bAnimPlanted)
+			{
+				Lock.bLocked = true;
+				// Touch down where the corrected foot currently is, so a foot still fading
+				// out of a previous lock doesn't jump.
+				Lock.LockedWorld = BallWorld + ComponentToWorld.TransformVector(Lock.Offset * Lock.Alpha);
+			}
+			else if (Lock.bLocked && BallCS.Z > ReleaseHeight)
+			{
+				Lock.bLocked = false;
+			}
+			if (Lock.bLocked)
+			{
+				FVector Correction = Lock.LockedWorld - BallWorld;
+				Correction.Z = 0.0;
+				Lock.Offset = ComponentToWorld.InverseTransformVector(Correction);
+				const float Distance = static_cast<float>(Correction.Size());
+				// The body has drifted too far from a planted foot (a standing pedestrian
+				// pushed aside, a walk slower or faster than the clip): take a step rather
+				// than stretch the leg or slide the foot. One foot at a time unless badly
+				// overstretched.
+				if (Distance > Set->FootLockMaxDistanceCm && (Other.StepTime < 0.0f || Distance > 1.6f * Set->FootLockMaxDistanceCm))
+				{
+					Lock.bLocked = false;
+					Lock.StepTime = 0.0f;
+					Lock.StepFrom = Lock.Offset;
+					Lock.Alpha = 1.0f;
+					++FootLockOverstretches;
+				}
+			}
+			if (Lock.StepTime < 0.0f)
+			{
+				// Ease in fast at touch-down, out over the swing.
+				const float Target = Lock.bLocked ? 1.0f : 0.0f;
+				const float Rate = DeltaSeconds / (Lock.bLocked ? 0.05f : 0.15f);
+				Lock.Alpha = Lock.Alpha < Target ? FMath::Min(Target, Lock.Alpha + Rate) : FMath::Max(Target, Lock.Alpha - Rate);
+			}
+		}
+		if (Lock.bLocked)
+		{
+			++NumLocked;
+		}
+		const FVector Offset = Lock.Offset * Lock.Alpha + FVector(0.0, 0.0, Lift);
+		FootLockCorrection = FMath::Max(FootLockCorrection, static_cast<float>((Lock.Offset * Lock.Alpha).Size()));
+		if (Offset.SizeSquared() < 0.01)
+		{
+			continue;
+		}
+
+		FTransform ThighT = ComponentPose.GetComponentSpaceTransform(Thigh);
+		FTransform CalfT = ComponentPose.GetComponentSpaceTransform(Calf);
+		FTransform FootT = ComponentPose.GetComponentSpaceTransform(Foot);
+		// Knee keeps bending the way it does in the clip (forward, +Y for these meshes).
+		const FVector Mid = (ThighT.GetLocation() + FootT.GetLocation()) * 0.5;
+		FVector Bend = CalfT.GetLocation() - Mid;
+		if (Bend.SizeSquared() < 1.0)
+		{
+			Bend = FVector::YAxisVector;
+		}
+		const FVector Pole = CalfT.GetLocation() + Bend.GetSafeNormal() * 50.0;
+		URammsSeatedPoseAnimInstance::SolveLimb(ThighT, CalfT, FootT, FootT.GetLocation() + Offset, Pole, /*bKeepEndRotation*/ true);
+		Changed.Reset();
+		Changed.Add(FBoneTransform(Thigh, ThighT));
+		Changed.Add(FBoneTransform(Calf, CalfT));
+		Changed.Add(FBoneTransform(Foot, FootT));
+		ComponentPose.SafeSetCSBoneTransforms(Changed);
+	}
+	LockedFeet = NumLocked;
+	FCSPose<FCompactPose>::ConvertComponentPosesToLocalPosesSafe(ComponentPose, Pose);
 }
 
 bool FRammsCrowdAnimProxy::Evaluate(FPoseContext& Output)
@@ -1089,6 +1242,15 @@ bool FRammsCrowdAnimProxy::Evaluate(FPoseContext& Output)
 			, GetComponentTransform()
 #endif
 		);
+	}
+
+	if (Frame.bLockFeet)
+	{
+		LockFeet(Output.Pose);
+	}
+	else
+	{
+		FootLocks[0] = FootLocks[1] = FFootLock();
 	}
 
 	FBoneWeights Weights;

@@ -175,6 +175,35 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Ramms|Crowd|Locomotion", meta = (ClampMin = "0.1"))
 	float MaxPlayRate = 1.6f;
 
+	/**
+	 * Foot locking: when the animation plants a foot, keep it where it touched down in
+	 * the world and bend the leg (two-bone IK) to reach it until the clip lifts the
+	 * foot again. Removes the sliding left when Mass moves the body at a different
+	 * speed or direction than the clip's feet (most noticeable in motion-matched
+	 * starts, stops and turns).
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Ramms|Crowd|Locomotion")
+	bool bLockPlantedFeet = true;
+
+	/** A foot counts as planted while its ball is below this height (component space, cm); it releases a few cm above. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Ramms|Crowd|Locomotion", meta = (ClampMin = "0.0"))
+	float FootPlantHeightCm = 5.0f;
+
+	/**
+	 * Once the body has moved this far from a locked foot (a standing pedestrian
+	 * nudged by avoidance, a walk slower or faster than the clip), the foot takes a
+	 * procedural step back under the body instead of stretching the leg or sliding, cm.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Ramms|Crowd|Locomotion", meta = (ClampMin = "0.0"))
+	float FootLockMaxDistanceCm = 12.0f;
+
+	/** Duration and height of that step. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Ramms|Crowd|Locomotion", meta = (ClampMin = "0.05"))
+	float FootStepSeconds = 0.3f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Ramms|Crowd|Locomotion", meta = (ClampMin = "0.0"))
+	float FootStepHeightCm = 7.0f;
+
 	/** Below this ground speed the pedestrian stands (idle); walk blends in up to IdleBlendEndCmS. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Ramms|Crowd|Locomotion", meta = (ClampMin = "0.0"))
 	float IdleBlendStartCmS = 12.0f;

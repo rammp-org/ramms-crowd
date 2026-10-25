@@ -77,6 +77,9 @@ struct FRammsCrowdAnimFrame
 	/** Motion matching: the pose history to record the finished pose into (owned by the instance). */
 	UE::PoseSearch::FPoseHistory* PoseHistory = nullptr;
 	bool bResetPoseHistory = false;
+	/** Pin planted feet in the world (see URammsCrowdAnimSet::bLockPlantedFeet); reset when the actor becomes someone else. */
+	bool bLockFeet = false;
+	bool bResetFootLocks = false;
 };
 
 /**
@@ -148,6 +151,17 @@ public:
 	UPROPERTY(BlueprintReadOnly, Category = "Ramms|Crowd|Motion Matching")
 	int32 MotionMatchSwitches = 0;
 
+	/** Feet currently pinned to the ground (0..2), for debugging and tests. */
+	UPROPERTY(BlueprintReadOnly, Category = "Ramms|Crowd")
+	int32 LockedFeet = 0;
+
+	/** Largest foot-lock correction applied last frame, cm, and how many locks were let go because the body moved too far. */
+	UPROPERTY(BlueprintReadOnly, Category = "Ramms|Crowd")
+	float FootLockCorrectionCm = 0.0f;
+
+	UPROPERTY(BlueprintReadOnly, Category = "Ramms|Crowd")
+	int32 FootLockOverstretches = 0;
+
 	/** Plays a reaction now (ignores the cooldown). */
 	UFUNCTION(BlueprintCallable, Category = "Ramms|Crowd")
 	void PlayReaction();
@@ -211,6 +225,7 @@ private:
 	FRammsCrowdAnimFrame Frame;
 
 	TSharedPtr<FRammsCrowdMotionMatching> MotionMatching;
+	bool bPendingFootReset = true;
 
 	friend struct FRammsCrowdAnimProxy;
 };
@@ -228,5 +243,24 @@ struct FRammsCrowdAnimProxy : public FAnimInstanceProxy
 	virtual bool Evaluate(FPoseContext& Output) override;
 
 private:
+	/** One foot's lock: where it was planted in the world and how much of the correction applies. */
+	struct FFootLock
+	{
+		bool bLocked = false;
+		FVector LockedWorld = FVector::ZeroVector;
+		/** Last correction in component space; fades out after release. */
+		FVector Offset = FVector::ZeroVector;
+		float Alpha = 0.0f;
+		/** 0..1 through a procedural step, or < 0 when not stepping. */
+		float StepTime = -1.0f;
+		FVector StepFrom = FVector::ZeroVector;
+	};
+
+	void LockFeet(FCompactPose& Pose);
+
 	FRammsCrowdAnimFrame Frame;
+	FFootLock FootLocks[2];
+	int32 LockedFeet = 0;
+	float FootLockCorrection = 0.0f;
+	int32 FootLockOverstretches = 0;
 };

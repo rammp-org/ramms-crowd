@@ -119,11 +119,31 @@ layer on top unchanged.
   `MotionMatchingBlendSeconds`. Playback is scaled toward the agent's speed
   within `MotionMatchingMinPlayRate`..`MotionMatchingMaxPlayRate`.
 - **Status**: off unless the sets are filled (`bUseMotionMatching` switches it
-  off without clearing them). Mass still moves the agents, so the feet slide more
-  than with the speed-matched blend. The next steps are stride and orientation
-  warping, and a mirror table for the crowd skeleton. Debug values on the
-  instance: `bMotionMatching`, `MotionPhase`, `MotionMatchedClip` and
-  `MotionMatchSwitches`.
+  off without clearing them). Debug values on the instance: `bMotionMatching`,
+  `MotionPhase`, `MotionMatchedClip` and `MotionMatchSwitches`. Next steps: a
+  mirror table for the crowd skeleton and limiting it to nearby agents.
+
+![Current blend vs motion matching with foot locking](images/crowd_foot_lock.webp)
+
+### Foot locking (`bLockPlantedFeet`)
+
+Mass moves the pedestrians, not the clips' root motion. Whenever the body's speed
+or direction differs from the clip's, a planted foot would slide. This shows most in
+motion-matched starts, stops and turns, and in standing pedestrians nudged by
+avoidance. Foot locking fixes it for both locomotion paths:
+
+- When the clip puts a foot down (ball below `FootPlantHeightCm`), the foot is
+  pinned where it touched down in the world. The leg bends to reach it with
+  two-bone IK, and the knee keeps the direction it has in the clip. When the clip
+  lifts the foot, the lock eases out over the swing.
+- If the body drifts more than `FootLockMaxDistanceCm` from a pinned foot, that
+  foot takes a procedural step (`FootStepSeconds`, `FootStepHeightCm`) back under
+  the body instead of stretching the leg or sliding. Only one foot steps at a time
+  unless the leg is badly overstretched.
+- The motion-matching pose history records the clip's own feet, before locking,
+  because that is what the search compares against.
+- Debug values on the instance: `LockedFeet`, `FootLockCorrectionCm` and
+  `FootLockOverstretches` (the number of steps taken).
 
 ### Fallback animation (`URammsCrowdAnimComponent` without an anim set)
 
