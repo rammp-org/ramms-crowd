@@ -45,6 +45,17 @@ URammsSeatComponent::URammsSeatComponent()
 	};
 }
 
+void URammsSeatComponent::SetLookAtLocation(const FVector WorldLocation)
+{
+	LookAtOverride = WorldLocation;
+	bHasLookAtOverride = true;
+}
+
+void URammsSeatComponent::ClearLookAt()
+{
+	bHasLookAtOverride = false;
+}
+
 void URammsSeatComponent::BeginPlay()
 {
 	Super::BeginPlay();

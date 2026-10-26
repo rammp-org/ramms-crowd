@@ -14,6 +14,67 @@ class FProperty;
 struct FPropertyChangedEvent;
 #endif
 
+/** What a placed hand or foot does with its orientation. */
+UENUM(BlueprintType)
+enum class ERammsSeatLimbEndRotation : uint8
+{
+	/** Turn with the forearm / shin (a relaxed wrist). */
+	FollowLimb,
+	/** Keep the base pose's orientation (a foot flat on a footplate). */
+	KeepPose,
+};
+
+/**
+ * Where one hand or foot goes on the seat, placed by two-bone IK after the base
+ * pose so it lands on the chair (joystick, armrest, footplate, lap) whatever the
+ * occupant's proportions.
+ */
+USTRUCT(BlueprintType)
+struct RAMMSCROWD_API FRammsSeatLimbTarget
+{
+	GENERATED_BODY()
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Ramms|Seat|Fit")
+	bool bEnabled = false;
+
+	/**
+	 * Where the hand (wrist) or foot (ankle) bone goes, in seat space (X forward, Y
+	 * right, Z up, cm) -- or, when RelativeToBone is set, offset from that occupant
+	 * bone along the seat's axes (a hand resting on the thigh).
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Ramms|Seat|Fit")
+	FVector Location = FVector::ZeroVector;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Ramms|Seat|Fit")
+	FName RelativeToBone;
+
+	/** A point, in seat space, the elbow or knee bends toward. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Ramms|Seat|Fit")
+	FVector PoleLocation = FVector::ZeroVector;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Ramms|Seat|Fit")
+	ERammsSeatLimbEndRotation EndRotation = ERammsSeatLimbEndRotation::FollowLimb;
+
+	/** 0 keeps the base pose, 1 reaches the target. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Ramms|Seat|Fit", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float Weight = 1.0f;
+};
+
+/** Fit corrections for one body build: flesh, not bones, differs between builds. */
+USTRUCT(BlueprintType)
+struct RAMMSCROWD_API FRammsSeatBodyAdjust
+{
+	GENERATED_BODY()
+
+	/** Added to PelvisLocation (seat space): heavier builds sit further from the backrest and higher on the cushion. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Ramms|Seat|Fit")
+	FVector Pelvis = FVector::ZeroVector;
+
+	/** Added to limb targets that rest on the body (RelativeToBone set), e.g. a hand on a thinner or thicker thigh. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Ramms|Seat|Fit")
+	FVector OnBody = FVector::ZeroVector;
+};
+
 UENUM(BlueprintType)
 enum class ERammsSeatOccupantMode : uint8
 {
@@ -76,6 +137,92 @@ public:
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Ramms|Seat|Pose")
 	TMap<FName, FRotator> PoseBoneOffsets;
+
+	// -- Fit to the seat -------------------------------------------------------
+	//
+	// PoseBoneOffsets give every occupant the same joint angles, so where their
+	// hips, hands and feet end up depends on their proportions: a tall occupant's
+	// pelvis sits further back and higher than a short one's, hands land on (or in)
+	// whatever is there. The fit moves the whole pose so the pelvis sits at
+	// PelvisLocation, then places each enabled hand and foot with two-bone IK.
+
+	/** Move the occupant so their pelvis bone sits at PelvisLocation (seat space). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Ramms|Seat|Fit")
+	bool bAlignPelvis = false;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Ramms|Seat|Fit", meta = (EditCondition = "bAlignPelvis"))
+	FVector PelvisLocation = FVector(-14.0, 0.0, 25.0);
+
+	/**
+	 * Per-build corrections for occupants whose leader mesh name contains the key, e.g.
+	 * "_ovw" / "_unw" for City Sample's over- and underweight builds, which share one
+	 * skeleton but not one silhouette.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Ramms|Seat|Fit")
+	TMap<FString, FRammsSeatBodyAdjust> BodyAdjustments;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Ramms|Seat|Fit")
+	FRammsSeatLimbTarget LeftHand;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Ramms|Seat|Fit")
+	FRammsSeatLimbTarget RightHand;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Ramms|Seat|Fit")
+	FRammsSeatLimbTarget LeftFoot;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Ramms|Seat|Fit")
+	FRammsSeatLimbTarget RightFoot;
+
+	// -- Motion ------------------------------------------------------------------
+	//
+	// The occupant is a wheelchair user: their legs never move voluntarily. Passive
+	// motion (the trunk and head carried by the chair's acceleration and turns) and
+	// voluntary upper-body motion (breathing, glances, looking where they are going)
+	// are separate, so each can be switched off or scaled for an experiment.
+
+	/** Passive: trunk and head lag the chair when it speeds up, brakes and turns, then settle. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Ramms|Seat|Motion")
+	bool bPassiveSway = true;
+
+	/** Scales the passive lean (1 = a seated adult with the trunk control below). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Ramms|Seat|Motion", meta = (ClampMin = "0.0", ClampMax = "3.0", EditCondition = "bPassiveSway"))
+	float SwayAmount = 1.0f;
+
+	/**
+	 * How well the occupant holds their trunk, 0..1. Low: leans further, slower and
+	 * bouncier, and the head does not counter the lean (e.g. a high spinal injury).
+	 * High: small, quickly settled lean with the head kept level.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Ramms|Seat|Motion", meta = (ClampMin = "0.0", ClampMax = "1.0", EditCondition = "bPassiveSway"))
+	float TrunkControl = 0.6f;
+
+	/** Voluntary upper-body motion: breathing, glancing around, small shifts. Never the legs. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Ramms|Seat|Motion")
+	bool bVoluntaryMotion = true;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Ramms|Seat|Motion", meta = (ClampMin = "0.0", ClampMax = "2.0", EditCondition = "bVoluntaryMotion"))
+	float VoluntaryAmount = 1.0f;
+
+	/** Look into turns, and over the shoulder when reversing. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Ramms|Seat|Motion", meta = (EditCondition = "bVoluntaryMotion"))
+	bool bLookWhereGoing = true;
+
+	/** Now and then glance at a pedestrian close by. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Ramms|Seat|Motion", meta = (EditCondition = "bVoluntaryMotion"))
+	bool bLookAtPeople = true;
+
+	/** Look at a world location until ClearLookAt (takes precedence over everything else). */
+	UFUNCTION(BlueprintCallable, Category = "Ramms|Seat|Motion")
+	void SetLookAtLocation(FVector WorldLocation);
+
+	UFUNCTION(BlueprintCallable, Category = "Ramms|Seat|Motion")
+	void ClearLookAt();
+
+	bool GetLookAtOverride(FVector& OutWorldLocation) const
+	{
+		OutWorldLocation = LookAtOverride;
+		return bHasLookAtOverride;
+	}
 
 	/** Spawns (or respawns) the occupant and applies the pose. */
 	UFUNCTION(BlueprintCallable, CallInEditor, Category = "Ramms|Seat")
@@ -221,6 +368,9 @@ private:
 
 	UPROPERTY(Transient)
 	TObjectPtr<AActor> Occupant;
+
+	bool bHasLookAtOverride = false;
+	FVector LookAtOverride = FVector::ZeroVector;
 
 	/**
 	 * Occupant blueprints (City Sample) finish assembling asynchronously — late

@@ -204,8 +204,57 @@ parametric seated pose.
 - **Editor preview**: `Spawn Occupant` / `Clear Occupant` / `Apply Pose` buttons
   on the component work without PIE (preview occupants are transient — never
   saved into the map).
-- Upgrade path: hand/foot IK fitting (armrests, joystick, footplates) can layer
-  on later; the pose map remains the base layer.
+
+### Fitting the occupant to the seat (`Ramms|Seat|Fit`)
+
+![Before / after: seat fit, passive sway and gaze](images/seat_occupant_before_after.webp)
+
+The pose map gives the overall posture; the fit layer then puts the body *on*
+the chair, whatever the occupant's build. All locations are in seat space
+(the component's frame, cm).
+
+- **`bAlignPelvis` / `PelvisLocation`**: moves the whole pose so the pelvis bone
+  lands on this point (sits the occupant on the cushion, back against the
+  backrest). Legs and arms are re-placed afterwards, so they don't drift.
+- **`LeftHand`, `RightHand`, `LeftFoot`, `RightFoot`** (`FRammsSeatLimbTarget`):
+  two-bone IK per limb. `Location` is where the wrist/ankle goes, `PoleLocation`
+  which way the elbow/knee points, `Weight` blends from the pose (0) to the
+  target (1). `RelativeToBone` makes the target follow another bone — e.g. a hand
+  resting in the lap uses `thigh_r` (the hip joint). `EndRotation = KeepPose` keeps the hand/foot
+  orientation from the pose (feet flat on a footplate) instead of following the
+  forearm/shin.
+- **`BodyAdjustments`**: per-build corrections keyed by a substring of the
+  occupant mesh name (`_ovw`, `_unw`, …). `Pelvis` shifts the pelvis target;
+  `OnBody` shifts targets that use `RelativeToBone` (a thin thigh is lower than
+  a heavy one). City Sample builds share one joint layout but differ in flesh,
+  so this is what keeps a hand on the lap rather than in it.
+
+`BP_Mebot_Ramms` in RAMMS-Sim carries a worked fit for the MeBot: left hand on
+the joystick module, right hand resting in the lap (the robot arm owns the
+right armrest), feet on the front of the base (there are no footplates). The
+right hand's relaxed finger curl is ordinary `PoseBoneOffsets` entries, taken
+from a frame of a City Sample idle (offset = reference⁻¹ × idle, per finger
+bone) rather than set by hand.
+
+### Occupant motion (`Ramms|Seat|Motion`)
+
+The occupant is a wheelchair user, so **the legs never move on their own**: no
+weight shifts or foot adjustments. Everything here acts on the spine, neck and
+head, after the fit and before the hand IK, so hands stay where the fit put
+them. Every part has its own switch and strength:
+
+| Property | Effect |
+|---|---|
+| `bPassiveSway`, `SwayAmount` (0–3) | Physics, not intent: the trunk lags the chair — leans back when it speeds up, forward when it brakes, outward in turns — as a damped spring on the seat's measured acceleration. |
+| `TrunkControl` (0–1) | How well the occupant holds their trunk. Low = slower, bouncier and larger sway; high = stiff and quickly damped. Also how much the head counter-rotates to stay level. |
+| `bVoluntaryMotion`, `VoluntaryAmount` (0–2) | Master switch and strength for the voluntary layer below (0 = a still, upright occupant). |
+| `bLookWhereGoing` | Looks into turns, and over the shoulder when reversing (on the side the back of the chair is swinging toward). |
+| `bLookAtPeople` | Now and then glances at a pedestrian within ~3.5 m in front or beside the chair. |
+| (always, scaled by `VoluntaryAmount`) | Breathing, slow trunk drift, idle glances around every few seconds. |
+| `SetLookAtLocation(World)` / `ClearLookAt()` | Scripted gaze target; overrides all of the above until cleared. |
+
+The anim instance exposes the current `SwayPitchDegrees`, `SwayRollDegrees`,
+`LookYawDegrees` and `LookPitchDegrees` for debugging and tests.
 
 ## Scripted authoring (Python / Remote Control)
 
