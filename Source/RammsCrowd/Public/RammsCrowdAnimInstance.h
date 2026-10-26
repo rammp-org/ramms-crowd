@@ -12,6 +12,12 @@ class URammsCrowdAnimComponent;
 class URammsCrowdAnimSet;
 struct FRammsCrowdBodyAnims;
 struct FRammsCrowdCarryStyle;
+struct FRammsCrowdMotionMatching;
+
+namespace UE::PoseSearch
+{
+	struct FPoseHistory;
+}
 
 namespace RammsCrowdAnim
 {
@@ -68,6 +74,23 @@ struct FRammsCrowdAnimFrame
 	float LookYawDegrees = 0.0f;
 	float LookPitchDegrees = 0.0f;
 	float LookAlpha = 0.0f;
+	/** Motion matching: the pose history to record the finished pose into (owned by the instance). */
+	UE::PoseSearch::FPoseHistory* PoseHistory = nullptr;
+	bool bResetPoseHistory = false;
+	/** Pin planted feet in the world (see URammsCrowdAnimSet::bLockPlantedFeet); reset when the actor becomes someone else. */
+	bool bLockFeet = false;
+	bool bResetFootLocks = false;
+	/** Stride warping: step length scale along the agent's velocity (world, cm/s). */
+	float StrideScale = 1.0f;
+	FVector AgentVelocity = FVector::ZeroVector;
+	/** Foot lift / rotation scale (1 = as captured). */
+	float FootLiftScale = 1.0f;
+	/** Motion matching: the playing clips' root travel direction in component space (zero when unknown), for orientation warping. */
+	FVector ClipTravel = FVector::ZeroVector;
+	/** Motion matching is playing a start or stop clip: planted feet hold firmly (no walking slip). */
+	bool bFirmFootLock = false;
+	/** Orientation warping limit, degrees (0 = off). */
+	float MaxOrientationWarpDegrees = 0.0f;
 };
 
 /**
@@ -125,6 +148,79 @@ public:
 	UPROPERTY(BlueprintReadOnly, Category = "Ramms|Crowd")
 	int32 ReactionCount = 0;
 
+	/** Motion matching: whether it drives locomotion, the clip it last selected, and how many clips it has switched to. */
+	UPROPERTY(BlueprintReadOnly, Category = "Ramms|Crowd|Motion Matching")
+	bool bMotionMatching = false;
+
+	UPROPERTY(BlueprintReadOnly, Category = "Ramms|Crowd|Motion Matching")
+	FName MotionMatchedClip;
+
+	/** Stand, Start, Move or Stop: which databases are being searched. */
+	UPROPERTY(BlueprintReadOnly, Category = "Ramms|Crowd|Motion Matching")
+	FName MotionPhase;
+
+	UPROPERTY(BlueprintReadOnly, Category = "Ramms|Crowd|Motion Matching")
+	int32 MotionMatchSwitches = 0;
+
+	/** Feet currently pinned to the ground (0..2), for debugging and tests. */
+	UPROPERTY(BlueprintReadOnly, Category = "Ramms|Crowd")
+	int32 LockedFeet = 0;
+
+	/** Largest foot-lock correction applied last frame, cm, and how many locks were let go because the body moved too far. */
+	UPROPERTY(BlueprintReadOnly, Category = "Ramms|Crowd")
+	float FootLockCorrectionCm = 0.0f;
+
+	UPROPERTY(BlueprintReadOnly, Category = "Ramms|Crowd")
+	int32 FootLockOverstretches = 0;
+
+	/** How many feet took their contact from the clip's contact curves last frame (0..2; else foot heights). */
+	UPROPERTY(BlueprintReadOnly, Category = "Ramms|Crowd")
+	int32 FootContactFromCurves = 0;
+
+	/** Debug: hip drop applied last frame (cm, negative when raised), and per foot (bits 0/1) whether it was locked, stepping, or pinned at the ball. */
+	UPROPERTY(BlueprintReadOnly, Category = "Ramms|Crowd")
+	float PelvisDropCm = 0.0f;
+
+	UPROPERTY(BlueprintReadOnly, Category = "Ramms|Crowd")
+	int32 FootLockBits = 0;
+
+	/** Debug: lower-body orientation warp applied last frame, degrees. */
+	UPROPERTY(BlueprintReadOnly, Category = "Ramms|Crowd")
+	float OrientationWarpDegrees = 0.0f;
+
+	/** Debug: each foot's lock correction before any slip (world, cm; Z = 1 while locked). */
+	UPROPERTY(BlueprintReadOnly, Category = "Ramms|Crowd")
+	FVector FootLockDriftL = FVector::ZeroVector;
+
+	UPROPERTY(BlueprintReadOnly, Category = "Ramms|Crowd")
+	FVector FootLockDriftR = FVector::ZeroVector;
+
+	/** Motion matching is playing a start or stop clip (game thread). */
+	bool bMotionTransitionClip = false;
+
+	/** Debug: share of the pose coming from the blended walk loops (bBlendedWalkLoops). */
+	UPROPERTY(BlueprintReadOnly, Category = "Ramms|Crowd")
+	float MotionLoopAlpha = 0.0f;
+
+	/** Debug: speed the trajectory prediction aims at (what the body is managing), cm/s. */
+	UPROPERTY(BlueprintReadOnly, Category = "Ramms|Crowd")
+	float MotionTargetSpeed = 0.0f;
+
+	/** Motion matching: the playing clips' root velocity in component space (game thread). */
+	FVector MotionClipTravel = FVector::ZeroVector;
+
+	/** Debug: left knee angle as the clip has it and after the feet are adjusted (deg), and the clip's left hip-to-ankle distance over the leg's reach. */
+	UPROPERTY(BlueprintReadOnly, Category = "Ramms|Crowd")
+	FVector FootDebug = FVector::ZeroVector;
+
+	/** Foot lift and heel / toe rotation scale applied last frame (1 = as captured). */
+	UPROPERTY(BlueprintReadOnly, Category = "Ramms|Crowd")
+	float FootLiftScale = 1.0f;
+
+	/** Step length scale applied last frame (stride warping; 1 = as captured). */
+	UPROPERTY(BlueprintReadOnly, Category = "Ramms|Crowd")
+	float StrideScale = 1.0f;
+
 	/** Plays a reaction now (ignores the cooldown). */
 	UFUNCTION(BlueprintCallable, Category = "Ramms|Crowd")
 	void PlayReaction();
@@ -146,6 +242,8 @@ private:
 	void SelectStyle(uint32 Seed);
 	void ApplyAccessory(const FRammsCrowdCarryStyle* Style, int32 PropIndex);
 	void UpdateLocomotion(float DeltaSeconds, float Speed, float DirectionDegrees);
+	/** Motion-matched locomotion into Frame; false when motion matching isn't available (falls back to the blended clips). */
+	bool UpdateMotionMatching(float DeltaSeconds);
 	void UpdateReaction(float DeltaSeconds);
 	void UpdateLookAt(float DeltaSeconds);
 	void StartReaction();
@@ -160,6 +258,9 @@ private:
 	float GaitPhase = 0.0f;
 	float SmoothedSpeed = 0.0f;
 	float SmoothedDirection = 0.0f;
+	/** Last frame's speed along the path and its smoothed rate of change (trajectory prediction). */
+	float PreviousPathSpeed = 0.0f;
+	float PathAcceleration = 0.0f;
 
 	const UAnimSequence* IdleSequence = nullptr;
 	float IdleTime = 0.0f;
@@ -185,6 +286,9 @@ private:
 
 	FRammsCrowdAnimFrame Frame;
 
+	TSharedPtr<FRammsCrowdMotionMatching> MotionMatching;
+	bool bPendingFootReset = true;
+
 	friend struct FRammsCrowdAnimProxy;
 };
 
@@ -201,5 +305,45 @@ struct FRammsCrowdAnimProxy : public FAnimInstanceProxy
 	virtual bool Evaluate(FPoseContext& Output) override;
 
 private:
+	/** One foot's lock: where it was planted in the world and how much of the correction applies. */
+	struct FFootLock
+	{
+		bool bLocked = false;
+		FVector LockedWorld = FVector::ZeroVector;
+		/** Last correction in component space; fades out after release. */
+		FVector Offset = FVector::ZeroVector;
+		float Alpha = 0.0f;
+		/** 0..1 through a procedural step, or < 0 when not stepping. */
+		float StepTime = -1.0f;
+		FVector StepFrom = FVector::ZeroVector;
+		/** The pinned point on the foot (in the foot bone's space): the heel, then the ball. */
+		FVector PinLocal = FVector::ZeroVector;
+		bool bPinBall = false;
+	};
+
+	/** Stride warping and foot locking, on the finished locomotion pose. */
+	void AdjustFeet(FCompactPose& Pose, const FBlendedCurve& Curve);
+
 	FRammsCrowdAnimFrame Frame;
+	FFootLock FootLocks[2];
+	int32 LockedFeet = 0;
+	float FootLockCorrection = 0.0f;
+	int32 FootLockOverstretches = 0;
+	int32 FootContactFromCurves = 0;
+	float RefAnkleHeight = 0.0f;
+	float RefBallHeight = 0.0f;
+	/** Pitch of the ankle-to-ball line in the reference pose, degrees (negative: ball below ankle). */
+	float RefFootPitch = 0.0f;
+	/** Current hip drop (cm) that keeps the legs from over-extending; eased. */
+	float PelvisDrop = 0.0f;
+	int32 FootLockBits = 0;
+	/** Orientation warp applied to the lower body, degrees (eased). */
+	float OrientationWarp = 0.0f;
+	FVector FootLockDrift[2] = { FVector::ZeroVector, FVector::ZeroVector };
+
+	/** Last clear knee bend direction per leg (component space), so a nearly straight leg keeps a stable pole. */
+	FVector KneeBend[2] = { FVector::ZeroVector, FVector::ZeroVector };
+	FVector FootDebug = FVector::ZeroVector;
+	/** The heel (the sole under the ankle in the flat bind pose), in the foot bone's space. */
+	FVector RefHeelLocal[2] = { FVector::ZeroVector, FVector::ZeroVector };
 };

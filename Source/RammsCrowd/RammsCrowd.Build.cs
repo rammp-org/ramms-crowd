@@ -45,6 +45,8 @@ public class RammsCrowd : ModuleRules
 				"MassNavMeshNavigation",
 				"MassRepresentation",
 				"MassLOD",
+				"PoseSearch",
+				"PropertyBindingUtils",
 				"ZoneGraphAnnotations",
 			}
 			);

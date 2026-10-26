@@ -91,6 +91,159 @@ the clips' "L" sync markers (gait phase; a clip without them counts as one cycle
 `IdleName`, `CarryName`) and its `LocomotionPlayRate`, `FootSpeedCmS` and
 `ReactionCount` for debugging.
 
+### Motion matching
+
+Instead of blending the per-body walk and directional clips, the anim instance can
+pick locomotion by motion matching (UE Pose Search) against the Game Animation
+Sample's (GASP) relaxed walk: real starts, stops, turns in place and pivots
+instead of a walk blended to the agent's speed. Carry poses, reactions and look-at
+layer on top unchanged.
+
+- **Content**: `Content/Python/ramms_crowd_build_motion_matching.py` builds it
+  from a GASP project created from Fab. It copies the GASP pieces it needs,
+  retargets the 57 clips the relaxed walk databases use onto the City Sample body,
+  and copies those databases onto the crowd skeleton, keeping their tuning
+  (`URammsCrowdMotionMatchingLibrary::AdaptPoseSearchDatabases`). It then fills
+  the anim set's `MotionMatching` sets.
+- **Retargeting legs by FK.** The retarget uses a copy of GASP's
+  `RTG_UEFN_to_Metahuman_nrw` with its IK ops turned off, so the leg joint
+  rotations are copied as captured. The IK version kept the feet exactly on their
+  source paths but re-bent the knees for the longer MetaHuman legs: straight at
+  heel strike, crouched in stance (median knee 35° against the capture's 29°) and
+  stiff in the swing (65° peak against 75°). With FK the feet drift a centimetre
+  or so per step, which foot locking absorbs.
+- **Orientation warping** (`MaxOrientationWarpDegrees`). Mass turns the body
+  after its velocity, so a clip walking straight ahead can be heading somewhere
+  the body isn't going. The hips and legs turn toward the direction of travel and
+  the spine turns most of the way back, so the steps go where the body goes
+  instead of the planted feet sliding sideways.
+- **Database sets** (`FRammsCrowdMotionDatabases`): `Stand`, `TurnInPlace`,
+  `Start`, `Move` and `Stop`. Like GASP's chooser, only the set that fits the
+  moment is searched, so costs from different schemas never compete. The set
+  is chosen from the current speed and the predicted speed 1 s ahead.
+- **Prediction**: the path eases from the current velocity onto the lane Mass
+  is following (`TrajectoryResponseSeconds`). The speed it aims at is what the
+  body is managing: its speed along the path plus the acceleration it is getting,
+  within the path's desired speed. (Aiming at the desired speed itself kept a
+  pedestrian held up by someone in front walking in place, feet dragged along;
+  Epic's own Mass trajectory processors predict from the post-avoidance velocity
+  for the same reason.) Below `MotionMatchingWalkSpeedCmS` (60) no clip walks, so
+  a held-up or shuffling pedestrian stops and stands. The path slows to a stop
+  when the pedestrian will stand at its goal, and the pedestrian turns to face the
+  direction it walks.
+- **Steady walking from the blended loops** (`bBlendedWalkLoops`, on). The crowd's
+  own walk and directional loops are made for these bodies at their walking speed
+  (140 cm/s), while the motion-matched walk is retargeted from the mannequin and
+  authored at 165 cm/s, so it always played slowed and stride-shortened. With this
+  on, the `Move` databases are not searched: motion matching supplies the starts,
+  stops and turns in place, and the Move phase cross-fades (0.15 s) to the same
+  blended loops the non-motion-matched path uses. A start clip plays out first;
+  a stop the pedestrian walks on from hands over at once. The loops' gait phase is
+  synced to the clip they follow (phase 0 is the left heel strike, the loops' `L`
+  marker and the GASP contact curves' rising edge; a stop pose, both feet down,
+  restarts at the left heel strike so the right foot leaves first). The loops
+  disable orientation warping (their directional blend already faces the travel)
+  and are foot-locked like everything else. Debug: `MotionLoopAlpha`,
+  `MotionTargetSpeed`.
+- **Playback**: searches run every `MotionMatchingSearchInterval` and when the
+  set changes or a one-shot clip runs out. New clips cross-fade over
+  `MotionMatchingBlendSeconds`. Playback is scaled toward the agent's speed
+  within `MotionMatchingMinPlayRate`..`MotionMatchingMaxPlayRate`.
+- **Status**: on wherever the sets are filled; `bUseMotionMatching` switches it
+  off without clearing them. In RAMMS-Sim the generated content is committed
+  (`Content/CrowdMM/AnimsFK` and `DatabasesFK`, about 84 MB; they depend only on
+  the City Sample crowd from Fab) and `DA_CrowdAnimSet` has it on. Pose Search
+  builds the database indexes into the derived data cache on first load, which
+  takes a little while once per machine. Debug values on the instance: `bMotionMatching`,
+  `MotionPhase`, `MotionMatchedClip` and `MotionMatchSwitches`. Next steps: a
+  mirror table for the crowd skeleton and limiting it to nearby agents.
+
+![Current blend vs motion matching with foot locking](images/crowd_foot_lock.webp)
+
+### Feet: stride warping and foot locking
+
+Mass moves the pedestrians, not the clips' root motion. Whenever the body's speed
+or direction differs from the clip's, a planted foot would slide. This shows most in
+motion-matched starts, stops and turns, and in standing pedestrians nudged by
+avoidance. Three things keep the feet honest, on both locomotion paths:
+
+- **Stride warping** (`bStrideWarping`, `MinStrideScale`..`MaxStrideScale`). The
+  difference between the agent's speed and the clip's is split: mostly playback
+  rate, the rest by lengthening or shortening the steps along the direction of
+  travel. Re-placing the feet changes how the knees bend (shorter steps bend the
+  leg reaching forward, longer ones straighten the trailing leg), so it is kept
+  small. The
+  clip speed is the blend of all playing clips, and the scales are eased (0.2 s),
+  so a newly matched clip never changes the legs in one frame.
+- **Foot lift scaling** (`bScaleFootLift`, `MinFootLiftScale`). Clips captured at
+  a brisk walk (GASP's is 165 cm/s) lift the toe and raise the heel far more than
+  a slower walker would. Below the clip's speed, the foot's height above the
+  ground and its heel-rise / toe-lift rotation are scaled toward a flat foot by the
+  speed ratio. Toe lift at heel strike is scaled on the ground too, but heel rise
+  and height only once the foot is in the air: lowering the heel of a planted foot
+  would force the trailing leg straight. A swinging foot is never lowered beyond
+  the leg's reach as the clip has it.
+- **Foot locking with heel-to-toe roll** (`bLockPlantedFeet`).
+  - **Contact:** comes from the clips' `contact_l` / `contact_r` curves when they
+    have them (GASP clips do: heel strike to toe-off). Otherwise it comes from foot
+    heights; an ankle check keeps a toe dipping mid-swing from counting as a plant.
+  - **Roll:** at heel strike the heel (a fixed point of the foot, the sole under
+    the ankle in the bind pose) is pinned where it lands and the foot rolls
+    about it. Once the ball is down the pin moves to the ball, which is also the
+    pivot at toe-off. The leg reaches the pinned foot with two-bone IK, and the knee
+    bends the way it does in the clip.
+  - **Release:** at toe-off the foot eases back to the clip over the swing
+    (`FootReleaseSeconds`), so the next step lands where the clip puts it.
+  - **Walking:** while walking, a planted foot holds against drift up to
+    `WalkingFootLockMaxCm` (11 cm) along the path and 1.6 times that sideways
+    (the path curving under a planted foot is easy for the legs to take), then
+    gives way by that much. A walking foot never takes a procedural step. Start
+    and stop clips plant their feet deliberately, so during them the feet hold
+    firmly (stepping if the body gets too far away).
+  - **Flat feet count as planted** even when the contact curve says otherwise:
+    the curves can start a little after the foot lands and end a little before it
+    lifts, and a flat foot that isn't held slides. Holding on longer
+    stretched the leg straight and ended the stance with a procedural step in
+    place of the clip's swing, which looked robotic.
+- **Corrective steps.** If the body drifts more than `FootLockMaxDistanceCm` from
+  a pinned foot, the foot takes a procedural step (`FootStepSeconds`,
+  `FootStepHeightCm`) back under the body instead of stretching or sliding. Only
+  one foot steps at a time unless the leg is badly overstretched. These are for
+  standing and slow pedestrians; walking feet slip instead (above).
+- **Hips and knees.** Each leg is solved once, after every foot change, with a
+  two-bone IK that keeps the clip's knee direction (remembered while the leg is
+  nearly straight, where it would otherwise be noise). A pose the clip plays as
+  captured is left exactly as captured, straight knees included. If a foot ends up
+  beyond the leg's reach the hips dip (up to 5 cm, as a walker's do into a long
+  step) and the knee eases off full extension (soft IK) rather than snapping.
+  While walking the hips don't dip: near full extension a centimetre of hip
+  height is ten degrees of knee on the other leg. If
+  shorter steps bring the planted feet closer, the hips rise (up to 3.5 cm) so the
+  knees keep the clip's bend instead of crouching.
+
+Motion matching adds two stop-specific pieces:
+
+- **Distance-matched stops.** A stop clip is played so that the distance its root
+  still travels equals the distance the agent has left to where it will stand
+  (`MassDistanceToStop`, measured from the agent rather than Mass's steering target,
+  which runs ahead of it).
+- **Play-out.** Once a start or stop clip is chosen it plays out rather than being
+  re-searched mid-transition. Re-searching would hop between left- and right-foot
+  variants and tangle the feet. What follows is matched early enough that the
+  cross-fade finishes before the clip runs out: a clip that has ended freezes,
+  and a frozen planted foot slides along with the body. Within the walk loop,
+  a match to another moment of the same loop is ignored (it would only cross-fade
+  between two step phases).
+
+The motion-matching pose history records the clip's own feet, before warping and
+locking, because that is what the search compares against.
+
+Debug values on the instance: `StrideScale`, `FootLiftScale`, `LockedFeet`, `FootLockCorrectionCm`,
+`FootLockOverstretches` (the number of steps taken), `FootContactFromCurves`,
+`PelvisDropCm` (negative when raised), `FootLockBits` (per foot: locked, stepping,
+pinned at the ball) and `FootDebug` (left knee angle in the clip and after
+adjustment, and the clip's hip-to-ankle distance over the leg's reach).
+
 ### Fallback animation (`URammsCrowdAnimComponent` without an anim set)
 
 Without an `AnimSet` the component drives the mesh itself as a single node:
@@ -141,6 +294,8 @@ vocabulary to compose from:
 | `RAMMS Stimulus Zone` (`FRammsStimulusZoneCondition`) | condition | zone ≥ MinZone (invertible) |
 | `RAMMS Closing Speed` (`FRammsClosingSpeedCondition`) | condition | approach speed ≥ threshold |
 | `RAMMS Back Away` (`FRammsBackAwayTask`) | task | retreat along AwayDirection while facing the stimulus, lane-safe distances |
+| `RAMMS Stand At Path End` (`FRammsStandAtPathEndTask`) | task | marks a ZoneGraph path target (bind the wander target, between it and Path Follow) as ending in a stand. The engine's wander target ends paths with a Move intent, so Mass applies no arrival slowdown: agents hit the goal at full speed, overshoot and creep back. `StandChance` (0..1, default 1) makes that a random choice per walk, and the `StandAtEnd` output tells the state's transitions which way it went; `ST_Pedestrian` uses 0.35, so each 5 m wander leg usually walks straight on into the next and about one in three ends in a pause |
+| `RAMMS Random Duration` (`FRammsRandomDurationTask`) | task | picks a duration between `MinSeconds` and `MaxSeconds` on entering the state, for a later task in the same state to bind (`ST_Pedestrian`'s Stand binds it to ZG Stand's Duration: 2–8 s pauses) |
 | engine: ZG Find Wander Target / Path Follow / Stand, LookAt, Find Escape Target, NavMesh tasks | tasks | locomotion + gaze building blocks |
 
 Recipes:

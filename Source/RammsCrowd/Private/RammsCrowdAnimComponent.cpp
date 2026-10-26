@@ -93,6 +93,7 @@ void URammsCrowdAnimComponent::TickComponent(const float DeltaTime, const ELevel
 	if (EntitySubsystem == nullptr || !CachedHandle.IsValid())
 	{
 		MassVelocity = FVector::ZeroVector;
+		MassDesiredVelocity = FVector::ZeroVector;
 		MassSpeed = 0.0f;
 		bMassIsMoving = false;
 		return;
@@ -102,6 +103,7 @@ void URammsCrowdAnimComponent::TickComponent(const float DeltaTime, const ELevel
 	if (!EntityManager.IsEntityValid(CachedHandle))
 	{
 		MassVelocity = FVector::ZeroVector;
+		MassDesiredVelocity = FVector::ZeroVector;
 		MassSpeed = 0.0f;
 		bMassIsMoving = false;
 		return;
@@ -112,9 +114,40 @@ void URammsCrowdAnimComponent::TickComponent(const float DeltaTime, const ELevel
 		MassVelocity = Velocity->Value;
 		MassSpeed = static_cast<float>(Velocity->Value.Size2D());
 	}
+	if (const FMassDesiredMovementFragment* Desired = EntityManager.GetFragmentDataPtr<FMassDesiredMovementFragment>(CachedHandle))
+	{
+		MassDesiredVelocity = Desired->DesiredVelocity;
+	}
+	else
+	{
+		MassDesiredVelocity = MassVelocity;
+	}
 	if (const FMassMoveTargetFragment* MoveTarget = EntityManager.GetFragmentDataPtr<FMassMoveTargetFragment>(CachedHandle))
 	{
 		bMassIsMoving = MoveTarget->GetCurrentAction() == EMassMovementAction::Move;
+		MassPathDirection = MoveTarget->Forward.GetSafeNormal2D();
+		MassDesiredSpeed = bMassIsMoving ? MoveTarget->DesiredSpeed.Get() : 0.0f;
+		MassDistanceToGoal = MoveTarget->DistanceToGoal;
+		const FVector AgentLocation = GetOwner() != nullptr ? GetOwner()->GetActorLocation() : MoveTarget->Center;
+		const double ToCenter = FVector::Dist2D(AgentLocation, MoveTarget->Center);
+		if (!bMassIsMoving)
+		{
+			// Standing: Mass still walks the agent onto the stand point (outside a ~15 cm dead zone).
+			bMassStopsAtGoal = true;
+			MassDistanceToStop = ToCenter > 15.0 ? static_cast<float>(ToCenter) : 0.0f;
+		}
+		else if (MoveTarget->IntentAtGoal == EMassMovementAction::Stand)
+		{
+			bMassStopsAtGoal = true;
+			const bool bEntityDistance = MoveTarget->EntityDistanceToGoal != FMassMoveTargetFragment::UnsetDistance;
+			const double Behind = FMath::Max(0.0, FVector::DotProduct(MoveTarget->Center - AgentLocation, MoveTarget->Forward));
+			MassDistanceToStop = static_cast<float>(bEntityDistance ? MoveTarget->EntityDistanceToGoal : MoveTarget->DistanceToGoal + Behind);
+		}
+		else
+		{
+			bMassStopsAtGoal = false;
+			MassDistanceToStop = 1.0e6f;
+		}
 	}
 	if (const FRammsCrowdProfileParameters* Profile = EntityManager.GetConstSharedFragmentDataPtr<FRammsCrowdProfileParameters>(CachedHandle))
 	{

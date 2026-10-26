@@ -7,6 +7,7 @@
 #include "RammsCrowdAnimSet.generated.h"
 
 class UAnimSequence;
+class UPoseSearchDatabase;
 class UStaticMesh;
 
 /** One looping locomotion clip and the ground motion it was authored with. */
@@ -99,6 +100,39 @@ struct RAMMSCROWD_API FRammsCrowdBodyAnims
 };
 
 /**
+ * Pose search databases for crowd motion matching, by what the pedestrian is doing.
+ * Searching only the set that fits the moment (as the Game Animation Sample's
+ * chooser does) keeps costs from different schemas from competing.
+ */
+USTRUCT(BlueprintType)
+struct RAMMSCROWD_API FRammsCrowdMotionDatabases
+{
+	GENERATED_BODY()
+
+	/** Standing: idles. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Ramms|Crowd")
+	TArray<TObjectPtr<UPoseSearchDatabase>> Stand;
+
+	/** Standing but turning to face somewhere else: turns in place (searched with Stand). */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Ramms|Crowd")
+	TArray<TObjectPtr<UPoseSearchDatabase>> TurnInPlace;
+
+	/** Setting off from standing. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Ramms|Crowd")
+	TArray<TObjectPtr<UPoseSearchDatabase>> Start;
+
+	/** Walking: loops, turns, pivots. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Ramms|Crowd")
+	TArray<TObjectPtr<UPoseSearchDatabase>> Move;
+
+	/** Coming to a stop. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Ramms|Crowd")
+	TArray<TObjectPtr<UPoseSearchDatabase>> Stop;
+
+	bool IsEmpty() const { return Stand.IsEmpty() && TurnInPlace.IsEmpty() && Start.IsEmpty() && Move.IsEmpty() && Stop.IsEmpty(); }
+};
+
+/**
  * Animation content for URammsCrowdAnimInstance: per-body walks, idles and carry
  * styles, shared directional walks and reactions, and the tuning that turns Mass
  * movement into a pose. Built for the City Sample crowd by
@@ -141,6 +175,86 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Ramms|Crowd|Locomotion", meta = (ClampMin = "0.1"))
 	float MaxPlayRate = 1.6f;
 
+	/**
+	 * Stride warping: when the agent walks faster or slower than the clip, cover part
+	 * of the difference by lengthening or shortening the steps along the direction of
+	 * travel (legs re-solved with IK) instead of only changing playback speed.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Ramms|Crowd|Locomotion")
+	bool bStrideWarping = true;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Ramms|Crowd|Locomotion", meta = (ClampMin = "0.5", ClampMax = "1.0"))
+	float MinStrideScale = 0.8f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Ramms|Crowd|Locomotion", meta = (ClampMin = "1.0", ClampMax = "1.6"))
+	float MaxStrideScale = 1.25f;
+
+	/**
+	 * Foot lift scaling: a slow walker lifts and rotates its feet less than the fast
+	 * walk the clip was captured at. Below the clip's speed, the foot's height above
+	 * the ground and its heel-rise / toe-lift rotation are scaled toward flat by the
+	 * speed ratio (not below MinFootLiftScale).
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Ramms|Crowd|Locomotion")
+	bool bScaleFootLift = true;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Ramms|Crowd|Locomotion", meta = (ClampMin = "0.1", ClampMax = "1.0"))
+	float MinFootLiftScale = 0.45f;
+
+	/**
+	 * Foot locking: when the animation plants a foot, keep it where it touched down in
+	 * the world and bend the leg (two-bone IK) to reach it until the clip lifts the
+	 * foot again. The pinned point rolls heel to ball like a real step. Contact comes
+	 * from the clips' contact_l / contact_r curves when they have them (GASP clips
+	 * do), else from foot heights. Removes the sliding left when Mass moves the body at a different
+	 * speed or direction than the clip's feet (most noticeable in motion-matched
+	 * starts, stops and turns).
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Ramms|Crowd|Locomotion")
+	bool bLockPlantedFeet = true;
+
+	/** A foot counts as planted while its ball is below this height (component space, cm); it releases a few cm above. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Ramms|Crowd|Locomotion", meta = (ClampMin = "0.0"))
+	float FootPlantHeightCm = 5.0f;
+
+	/**
+	 * Once the body has moved this far from a locked foot (a standing pedestrian
+	 * nudged by avoidance, a walk slower or faster than the clip), the foot takes a
+	 * procedural step back under the body instead of stretching the leg or sliding, cm.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Ramms|Crowd|Locomotion", meta = (ClampMin = "0.0"))
+	float FootLockMaxDistanceCm = 12.0f;
+
+	/**
+	 * While walking, a locked foot gives way (slips a little) once it is this far from
+	 * where the clip has it along the path (1.6 times that sideways), cm, rather than
+	 * holding the leg until it straightens and
+	 * then stepping: the clip's own stride is kept. Faded in between 30 and 80 cm/s.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Ramms|Crowd|Locomotion", meta = (ClampMin = "0.0"))
+	float WalkingFootLockMaxCm = 11.0f;
+
+	/**
+	 * Orientation warping (motion matching): when the body faces a different way
+	 * from where it is going (Mass turns the body after the velocity), the hips and
+	 * legs turn toward the direction of travel by up to this angle and the spine
+	 * turns most of the way back, so the steps go where the body goes instead of
+	 * sliding sideways. 0 turns it off.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Ramms|Crowd|Locomotion", meta = (ClampMin = "0.0", ClampMax = "90.0"))
+	float MaxOrientationWarpDegrees = 60.0f;
+
+	/** How long a released foot takes to go back to the clip during its swing, s. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Ramms|Crowd|Locomotion", meta = (ClampMin = "0.05"))
+	float FootReleaseSeconds = 0.25f;
+
+	/** Duration and height of that step. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Ramms|Crowd|Locomotion", meta = (ClampMin = "0.05"))
+	float FootStepSeconds = 0.3f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Ramms|Crowd|Locomotion", meta = (ClampMin = "0.0"))
+	float FootStepHeightCm = 7.0f;
+
 	/** Below this ground speed the pedestrian stands (idle); walk blends in up to IdleBlendEndCmS. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Ramms|Crowd|Locomotion", meta = (ClampMin = "0.0"))
 	float IdleBlendStartCmS = 12.0f;
@@ -176,6 +290,63 @@ public:
 
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Ramms|Crowd|Look At", meta = (ClampMin = "0.01"))
 	float LookAtBlendSeconds = 0.35f;
+
+	/**
+	 * Motion matching (experimental): when set, locomotion comes from searching pose
+	 * search databases (built on the crowd skeleton) for the clip and frame that best
+	 * continue the current pose along the pedestrian's predicted path, instead of
+	 * blending the per-body walk and directional clips. Starts, stops, turns and
+	 * pivots then come from captured motion. Carry, reactions and look-at layer on
+	 * top as before. See Content/Python/ramms_crowd_build_motion_matching.py.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Ramms|Crowd|Motion Matching")
+	FRammsCrowdMotionDatabases MotionMatching;
+
+	/** Switch motion matching off without clearing the databases. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Ramms|Crowd|Motion Matching")
+	bool bUseMotionMatching = true;
+
+	/** Below this speed (now and over the predicted path) a pedestrian counts as standing, cm/s. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Ramms|Crowd|Motion Matching", meta = (ClampMin = "0.0"))
+	float MotionMatchingStandSpeedCmS = 25.0f;
+
+	/**
+	 * Below this speed no clip walks: a pedestrian held up by someone in front (or
+	 * shuffling under avoidance) stops and stands rather than walking in place with
+	 * the feet dragged along, cm/s. The prediction is made from the speed the body
+	 * is managing, not from the speed it would like, so being blocked reads as a stop.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Ramms|Crowd|Motion Matching", meta = (ClampMin = "0.0"))
+	float MotionMatchingWalkSpeedCmS = 60.0f;
+
+	/**
+	 * Steady walking uses the per-body walk and directional clips blended to the
+	 * agent's speed (the same as with motion matching off), and motion matching only
+	 * supplies the starts, stops and turns in place. The crowd's own loops are made for
+	 * these bodies at their walking speed; the motion-matched walk is retargeted and
+	 * authored at a brisker pace. The Move databases are then not searched.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Ramms|Crowd|Motion Matching")
+	bool bBlendedWalkLoops = true;
+
+	/** Seconds between searches (the current clip keeps playing in between). */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Ramms|Crowd|Motion Matching", meta = (ClampMin = "0.0"))
+	float MotionMatchingSearchInterval = 0.1f;
+
+	/** Crossfade into a newly selected clip, seconds. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Ramms|Crowd|Motion Matching", meta = (ClampMin = "0.0"))
+	float MotionMatchingBlendSeconds = 0.25f;
+
+	/** How quickly the predicted path bends from the current velocity to Mass's desired velocity, seconds. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Ramms|Crowd|Motion Matching", meta = (ClampMin = "0.01"))
+	float TrajectoryResponseSeconds = 0.35f;
+
+	/** Clip playback is scaled toward the agent's speed within this range, so the feet keep up without obvious slow motion. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Ramms|Crowd|Motion Matching", meta = (ClampMin = "0.1"))
+	float MotionMatchingMinPlayRate = 0.7f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Ramms|Crowd|Motion Matching", meta = (ClampMin = "0.1"))
+	float MotionMatchingMaxPlayRate = 1.2f;
 
 	/** Seconds before the same pedestrian can react again. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Ramms|Crowd|Reactions", meta = (ClampMin = "0.0"))
