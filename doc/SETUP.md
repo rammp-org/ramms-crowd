@@ -67,7 +67,7 @@ matter):
 | **RAMMS Representation Support** | (no settings) |
 | Mass Movement | defaults (walk ~140 cm/s ±10%) or a movement style |
 | Mass Steering | defaults |
-| Mass Obstacle Avoidance | defaults |
+| Mass Obstacle Avoidance | Moving: StartOfPathAvoidanceScale **1.0**, EndOfPathAvoidanceScale **1.0**, StandingObstacleAvoidanceScale **1.0**, SeparationRadiusScale **1.0**, PredictiveAvoidanceRadiusScale **1.1**, ObstacleSeparationDistance **90**, ObstacleSeparationStiffness **400**. Standing: GhostSeparationDistance **60**, GhostSeparationRadiusScale **1.0**. The engine defaults (avoidance scaled to 0 at the start and 0.1 at the end of each path, predicted clearance at 0.65 × radius) let pedestrians walk into each other, mostly when arriving next to someone already standing; these cut close contacts (centres under 45 cm) about eightfold. Rest default. |
 | Mass Navigation Obstacle | (registers agents in the avoidance grid) |
 | Mass ZoneGraph Navigation | LaneFilter AnyTags = **Crowd**; **QueryRadius ≥ max spawn-point-to-lane distance** (1000 works) |
 | Mass Crowd Member | (adds `FMassCrowdTag` — required, see gotcha) |
