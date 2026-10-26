@@ -160,9 +160,11 @@ layer on top unchanged.
   when the pedestrian will stand at its goal, and the pedestrian turns to face the
   direction it walks.
 - **Steady walking from the blended loops** (`bBlendedWalkLoops`, on). The crowd's
-  own walk and directional loops are made for these bodies at their walking speed
-  (140 cm/s), while the motion-matched walk is retargeted from the mannequin and
-  authored at 165 cm/s, so it always played slowed and stride-shortened. With this
+  own walk and directional loops are made for these bodies at 140 cm/s and
+  stride-warped to the agent's speed (165 by default), while the motion-matched
+  walk is retargeted from the mannequin and authored at 165 cm/s. Even at 165,
+  where that walk plays at its native rate, the loops have the cleaner footwork
+  (sliding 3.1% vs 5.1% of flat-foot frames over the same 30 s). With this
   on, the `Move` databases are not searched: motion matching supplies the starts,
   stops and turns in place, and the Move phase cross-fades (0.15 s) to the same
   blended loops the non-motion-matched path uses. A start clip plays out first;
