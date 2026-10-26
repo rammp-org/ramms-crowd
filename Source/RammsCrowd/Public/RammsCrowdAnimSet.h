@@ -306,6 +306,16 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Ramms|Crowd|Motion Matching")
 	bool bUseMotionMatching = true;
 
+	/**
+	 * Use the trajectory Mass generates for the entity (UE 5.8 Character Trajectory
+	 * Generation trait, normally with the Spring Movement trait) for the search and
+	 * the phase choice, instead of the built-in prediction. The body then moves along
+	 * the same smoothed path the animation was matched to. Falls back to the built-in
+	 * prediction for entities without the trait.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Ramms|Crowd|Motion Matching")
+	bool bUseMassTrajectory = true;
+
 	/** Below this speed (now and over the predicted path) a pedestrian counts as standing, cm/s. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Ramms|Crowd|Motion Matching", meta = (ClampMin = "0.0"))
 	float MotionMatchingStandSpeedCmS = 25.0f;

@@ -121,10 +121,38 @@ layer on top unchanged.
   `Start`, `Move` and `Stop`. Like GASP's chooser, only the set that fits the
   moment is searched, so costs from different schemas never compete. The set
   is chosen from the current speed and the predicted speed 1 s ahead.
-- **Prediction**: the path eases from the current velocity onto the lane Mass
-  is following (`TrajectoryResponseSeconds`). The speed it aims at is what the
-  body is managing: its speed along the path plus the acceleration it is getting,
-  within the path's desired speed. (Aiming at the desired speed itself kept a
+- **Trajectory from Mass** (`bUseMassTrajectory`, on; the **RAMMS Crowd
+  Trajectory** trait on the entity config). A Mass processor
+  (`URammsCrowdTrajectoryProcessor`) predicts each agent's trajectory into the
+  engine's `FCharacterTrajectoryFragment` (UE 5.8 `MassCharacterTrajectory`, the
+  fragment the MetaHuman Crowd and UAF actors read), in the mesh's space: the
+  recorded path behind, then Epic's critically damped spring (`SpringMath`) from
+  the agent's current velocity and acceleration toward where it is going (along
+  its path, at the speed it wants, braking to a stop at a goal it will stand at,
+  and never faster than it is managing, so a held-up agent is predicted to stop).
+  The anim instance hands that to the search and reads its outlook (the speed
+  1 s ahead, the final facing) for the phase choice. It runs in parallel in
+  Mass, and the search's input is a standard fragment other systems can share.
+  Entities without the trait get the built-in prediction below.
+  - The engine's own pair, **Spring Movement** + **Character Trajectory
+    Generation**, was tried first. Its spring predicts the same way but also
+    *drives* the body, so the body follows the predicted path exactly; in a
+    crowd that added the spring's smoothing time of lag that avoidance cannot
+    see, and pedestrians closer than 45 cm centre to centre went from 0.02–0.09
+    to 0.2–0.35 per frame (a stiffer spring didn't recover it; a spring that
+    doesn't move the body is not an option, as Mass's own movement processor
+    skips spring entities). Without a spring the engine extrapolates at constant
+    velocity, which never anticipates a stop. Hence the processor here, which
+    predicts like the spring and leaves movement to Mass. The processor is
+    deliberately not in the engine's `CharacterTrajectoryGeneration` group: that
+    group runs before Movement, this one after it, and the cycle made the
+    scheduler reorder avoidance behind movement.
+  - Measured against the built-in prediction over 30 s of the test crowd: the
+    same knees, sliding (3.3% vs 3.0% of flat-foot frames) and close contacts.
+- **Built-in prediction** (fallback): the path eases from the current velocity
+  onto the lane Mass is following (`TrajectoryResponseSeconds`). The speed it
+  aims at is what the body is managing: its speed along the path plus the
+  acceleration it is getting, within the path's desired speed. (Aiming at the desired speed itself kept a
   pedestrian held up by someone in front walking in place, feet dragged along;
   Epic's own Mass trajectory processors predict from the post-avoidance velocity
   for the same reason.) Below `MotionMatchingWalkSpeedCmS` (60) no clip walks, so

@@ -206,6 +206,10 @@ public:
 	UPROPERTY(BlueprintReadOnly, Category = "Ramms|Crowd")
 	float MotionTargetSpeed = 0.0f;
 
+	/** Debug: the search used the trajectory Mass generated (bUseMassTrajectory) last frame. */
+	UPROPERTY(BlueprintReadOnly, Category = "Ramms|Crowd")
+	bool bMassTrajectoryUsed = false;
+
 	/** Motion matching: the playing clips' root velocity in component space (game thread). */
 	FVector MotionClipTravel = FVector::ZeroVector;
 

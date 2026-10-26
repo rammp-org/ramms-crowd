@@ -64,6 +64,7 @@ matter):
 |---|---|
 | **RAMMS Crowd Agent** (`URammsCrowdAgentTrait`) | Radius 35; ActorKind Person; GaitVariation 0.25; **RepresentationActorYawOffsetDegrees −90** (City Sample meshes — see gotcha below); `bRepresentationBlocksPhysics` off (see below) |
 | **RAMMS Crowd Reaction** (`URammsCrowdReactionTrait`) | Profile = `DA_Reaction_Person` |
+| **RAMMS Crowd Trajectory** (`URammsCrowdTrajectoryTrait`) | Trajectory: 30 history samples, 15 predictions at 0.1 s, **Offset yaw −90** (the same offset as the actor yaw above, so the trajectory is in the mesh's space). Prediction: smoothing 0.15 s. Fills the engine's `FCharacterTrajectoryFragment` (UE 5.8 MassCharacterTrajectory) for the crowd's motion matching; `DefaultMass.ini` switches the engine's own generation processor off so it doesn't overwrite it. See CUSTOMIZATION.md, "Motion matching". |
 | **RAMMS Representation Support** | (no settings) |
 | Mass Movement | defaults (walk ~140 cm/s ±10%) or a movement style |
 | Mass Steering | defaults |

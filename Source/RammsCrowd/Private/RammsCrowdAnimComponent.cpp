@@ -11,6 +11,7 @@
 #include "MassActorSubsystem.h"
 #include "MassEntityManager.h"
 #include "MassEntitySubsystem.h"
+#include "MassCharacterTrajectoryFragments.h"
 #include "MassMovementFragments.h"
 #include "MassNavigationFragments.h"
 #include "RammsCrowdAgentTrait.h"
@@ -121,6 +122,15 @@ void URammsCrowdAnimComponent::TickComponent(const float DeltaTime, const ELevel
 	else
 	{
 		MassDesiredVelocity = MassVelocity;
+	}
+	if (const FCharacterTrajectoryFragment* Trajectory = EntityManager.GetFragmentDataPtr<FCharacterTrajectoryFragment>(CachedHandle))
+	{
+		MassTrajectory = Trajectory->Trajectory;
+		bHasMassTrajectory = MassTrajectory.Samples.Num() > 2;
+	}
+	else
+	{
+		bHasMassTrajectory = false;
 	}
 	if (const FMassMoveTargetFragment* MoveTarget = EntityManager.GetFragmentDataPtr<FMassMoveTargetFragment>(CachedHandle))
 	{

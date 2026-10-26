@@ -19,6 +19,7 @@ public class RammsCrowd : ModuleRules
 				"MassActors",
 				"MassSpawner",
 				"MassMovement",
+				"MassCharacterTrajectory",
 				"MassNavigation",
 				"MassAIBehavior",
 				"MassSignals",

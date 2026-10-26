@@ -5,6 +5,7 @@
 #include "CoreMinimal.h"
 #include "Components/ActorComponent.h"
 #include "MassEntityHandle.h"
+#include "Animation/TrajectoryTypes.h"
 #include "RammsCrowdStimulusTypes.h"
 #include "RammsCrowdAnimComponent.generated.h"
 
@@ -52,6 +53,16 @@ public:
 
 	UPROPERTY(BlueprintReadOnly, Category = "Ramms|Crowd")
 	float MassDistanceToGoal = 0.0f;
+
+	/**
+	 * The trajectory Mass generated for this entity (UE 5.8 Character Trajectory
+	 * Generation trait: recorded history plus the spring's prediction), in the space
+	 * of the mesh, when the entity has one. Empty otherwise.
+	 */
+	FTransformTrajectory MassTrajectory;
+
+	UPROPERTY(BlueprintReadOnly, Category = "Ramms|Crowd")
+	bool bHasMassTrajectory = false;
 
 	/** True when the pedestrian means to stand once it reaches its goal. */
 	UPROPERTY(BlueprintReadOnly, Category = "Ramms|Crowd")
