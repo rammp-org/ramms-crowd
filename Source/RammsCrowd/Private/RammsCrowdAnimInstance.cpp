@@ -273,6 +273,8 @@ struct FRammsCrowdMotionMatching
 		bool bLooping = false;
 		/** How long this layer takes to fade in (shorter when the clip it replaces is running out). */
 		float BlendSeconds = 0.25f;
+		/** Picked as a start clip: the blended loops wait for it to play out. */
+		bool bStartClip = false;
 	};
 
 	struct FPastSample
@@ -304,6 +306,9 @@ struct FRammsCrowdMotionMatching
 	/** Stride and foot-lift scales, eased so a clip switch never changes the legs in one frame. */
 	float Stride = 1.0f;
 	float Lift = 1.0f;
+	/** Share of the pose from the blended walk loops (bBlendedWalkLoops), and whether their gait phase was synced to the clip they follow. */
+	float LoopAlpha = 0.0f;
+	bool bLoopPhaseSynced = false;
 
 	FRammsCrowdMotionMatching()
 	{
@@ -316,6 +321,8 @@ struct FRammsCrowdMotionMatching
 		Layers.Reset();
 		Stride = 1.0f;
 		Lift = 1.0f;
+		LoopAlpha = 0.0f;
+		bLoopPhaseSynced = false;
 		SinceSearch = UE_BIG_NUMBER;
 		Past.Reset();
 		Phase = EPhase::Stand;
@@ -441,22 +448,41 @@ bool URammsCrowdAnimInstance::UpdateMotionMatching(const float DeltaSeconds)
 		const float Alpha = B.Time > A.Time ? static_cast<float>(FMath::Clamp((When - A.Time) / (B.Time - A.Time), 0.0, 1.0)) : 0.0f;
 		AddSample(-Step * 0.1f, FMath::Lerp(A.Position, B.Position, Alpha), FQuat::Slerp(A.Facing, B.Facing, Alpha));
 	}
-	// Prediction: from the current velocity toward the path Mass is following, at its
-	// desired speed, slowing to a stop at a goal where the pedestrian will stand.
+	// Prediction: from the current velocity toward the path Mass is following, slowing
+	// to a stop at a goal where the pedestrian will stand. The speed aimed at is what
+	// the body is managing (its speed along the path plus the acceleration it is
+	// getting, within the path's desired speed), not the path's desired speed itself:
+	// a pedestrian held up by someone in front is then predicted to stop, and stops,
+	// instead of walking in place with the feet dragged along.
 	const float StandSpeed = AnimSet->MotionMatchingStandSpeedCmS;
+	const float WalkSpeed = FMath::Max(AnimSet->MotionMatchingWalkSpeedCmS, StandSpeed);
 	FVector Velocity(Comp->MassVelocity.X, Comp->MassVelocity.Y, 0.0);
-	const float Speed0 = static_cast<float>(Velocity.Size2D());
+	float Speed0 = static_cast<float>(Velocity.Size2D());
 	FVector PathDirection = Comp->MassPathDirection.GetSafeNormal2D();
 	if (PathDirection.IsNearlyZero())
 	{
 		PathDirection = Speed0 > StandSpeed ? Velocity.GetSafeNormal2D() : BodyForward;
 	}
-	// Standing agents may still be finishing the approach to their stand point.
-	const float TargetSpeed = Comp->bMassIsMoving ? Comp->MassDesiredSpeed : (Comp->MassDistanceToStop > 0.0f ? Speed0 : 0.0f);
-	if (Speed0 < StandSpeed && TargetSpeed < StandSpeed)
+	const float PathSpeed = FMath::Max(0.0f, static_cast<float>(FVector::DotProduct(Velocity, PathDirection)));
+	PathAcceleration += ((PathSpeed - PreviousPathSpeed) / FMath::Max(DeltaSeconds, 1.0e-3f) - PathAcceleration) * (1.0f - FMath::Exp(-DeltaSeconds / 0.1f));
+	PreviousPathSpeed = PathSpeed;
+	float TargetSpeed;
+	if (Comp->bMassIsMoving)
 	{
-		// Shuffling under avoidance: treat as standing rather than walking in place.
+		TargetSpeed = FMath::Clamp(PathSpeed + FMath::Max(PathAcceleration, 0.0f) * 0.6f, 0.0f, FMath::Max(Comp->MassDesiredSpeed, Speed0));
+	}
+	else
+	{
+		// Standing agents may still be finishing the approach to their stand point.
+		TargetSpeed = Comp->MassDistanceToStop > 0.0f ? Speed0 : 0.0f;
+	}
+	MotionTargetSpeed = TargetSpeed;
+	if (Speed0 < WalkSpeed && TargetSpeed < WalkSpeed)
+	{
+		// Shuffling under avoidance, or held up: standing, as far as the clips are
+		// concerned (the foot lock steps the feet along if the body creeps).
 		Velocity = FVector::ZeroVector;
+		Speed0 = 0.0f;
 	}
 	float Remaining = Comp->bMassStopsAtGoal ? Comp->MassDistanceToStop : UE_BIG_NUMBER;
 	const float Tau = FMath::Max(AnimSet->TrajectoryResponseSeconds, 0.01f);
@@ -468,7 +494,7 @@ bool URammsCrowdAnimInstance::UpdateMotionMatching(const float DeltaSeconds)
 	for (int32 Step = 1; Step <= 12; ++Step)
 	{
 		const float Allowed = Comp->bMassStopsAtGoal ? FMath::Min(TargetSpeed, FMath::Sqrt(2.0f * 150.0f * FMath::Max(Remaining, 0.0f))) : TargetSpeed;
-		const FVector VelocityTarget = Allowed < StandSpeed ? FVector::ZeroVector : PathDirection * Allowed;
+		const FVector VelocityTarget = Allowed < WalkSpeed ? FVector::ZeroVector : PathDirection * Allowed;
 		Velocity = VelocityTarget + (Velocity - VelocityTarget) * StepDecay;
 		At += Velocity * 0.1;
 		Remaining -= static_cast<float>(Velocity.Size2D()) * 0.1f;
@@ -489,11 +515,11 @@ bool URammsCrowdAnimInstance::UpdateMotionMatching(const float DeltaSeconds)
 	// What the pedestrian is doing picks the databases to search, like GASP's chooser.
 	using EPhase = FRammsCrowdMotionMatching::EPhase;
 	EPhase Want = EPhase::Move;
-	if (Speed0 < StandSpeed && Speed1 < StandSpeed)
+	if (Speed0 < StandSpeed && Speed1 < WalkSpeed)
 	{
 		Want = EPhase::Stand;
 	}
-	else if (Speed1 < StandSpeed)
+	else if (Speed1 < WalkSpeed)
 	{
 		Want = EPhase::Stop;
 	}
@@ -555,7 +581,8 @@ bool URammsCrowdAnimInstance::UpdateMotionMatching(const float DeltaSeconds)
 	case EPhase::Stop: AddSet(Sets.Stop); break;
 	default: break;
 	}
-	if (Assets.IsEmpty())
+	const bool bLoops = AnimSet->bBlendedWalkLoops && !LocoClips.IsEmpty() && LocoClips[0].Sequence != nullptr;
+	if (Assets.IsEmpty() && !bLoops)
 	{
 		AddSet(Sets.Move);
 	}
@@ -605,19 +632,110 @@ bool URammsCrowdAnimInstance::UpdateMotionMatching(const float DeltaSeconds)
 					const FRammsCrowdMotionMatching::FLayer& Previous = State.Layers.Last();
 					FadeSeconds = FMath::Min(FadeSeconds, FMath::Max(0.05f, (Previous.Sequence->GetPlayLength() - Previous.Time) / FMath::Max(LocomotionPlayRate, 0.1f)));
 				}
-				State.Layers.Add({ Sequence, Time, State.Layers.IsEmpty() ? 1.0f : 0.0f, IndexAsset != nullptr && IndexAsset->IsLooping(), FadeSeconds });
+				State.Layers.Add({ Sequence, Time, State.Layers.IsEmpty() ? 1.0f : 0.0f, IndexAsset != nullptr && IndexAsset->IsLooping(), FadeSeconds, State.Phase == EPhase::Start });
 				MotionMatchedClip = Sequence->GetFName();
 				++MotionMatchSwitches;
 				State.bPhaseClipChosen = true;
 			}
 		}
 	}
+	// Steady walking from the blended loops (bBlendedWalkLoops): once the start clip
+	// (or whatever was last picked) is about to end, the loops fade in with their gait
+	// phase synced to it, and fade out again when a stop or turn clip is picked. With
+	// the loops fully in, the layer stack is dropped and the pose is the plain blend.
+	// A short fade: while it lasts, a planted foot in the clip and a moving one in the
+	// loop are averaged, which slides.
+	const float LoopBlendSeconds = FMath::Clamp(0.6f * AnimSet->MotionMatchingBlendSeconds, 0.05f, 0.2f);
+	bool bWantLoops = false;
+	if (bLoops && State.Phase == EPhase::Move)
+	{
+		if (State.Layers.IsEmpty())
+		{
+			bWantLoops = true;
+		}
+		else
+		{
+			// A start clip plays out first (its first steps are the point of it); any
+			// other clip (a stop the pedestrian walked on from) hands over at once.
+			const FRammsCrowdMotionMatching::FLayer& Last = State.Layers.Last();
+			bWantLoops = !Last.bStartClip || Last.bLooping || Last.Time >= Last.Sequence->GetPlayLength() - LoopBlendSeconds;
+		}
+	}
+	if (bWantLoops && !State.bLoopPhaseSynced)
+	{
+		// Pick up the gait where the clip left it: phase 0 is the left heel strike (the
+		// loops' "L" marker), 0.5 the right; the GASP clips' contact curves rise there.
+		State.bLoopPhaseSynced = true;
+		// No heel strike to be found (a stop pose, both feet down): start the loops at
+		// the left heel strike, so the right foot is the first to leave the ground.
+		GaitPhase = 0.0f;
+		if (!State.Layers.IsEmpty())
+		{
+			const FRammsCrowdMotionMatching::FLayer& Last = State.Layers.Last();
+			static const FName ContactLeft(TEXT("contact_l")), ContactRight(TEXT("contact_r"));
+			const float Step = 1.0f / 60.0f;
+			for (float Back = 0.0f; Back < 1.5f && Last.Time - Back - Step >= 0.0f; Back += Step)
+			{
+				const float T = Last.Time - Back;
+				bool bFound = false;
+				for (int32 Side = 0; Side < 2; ++Side)
+				{
+					const FName& Curve = Side == 0 ? ContactLeft : ContactRight;
+					if (Last.Sequence->EvaluateCurveData(Curve, T) >= 0.5f && Last.Sequence->EvaluateCurveData(Curve, T - Step) < 0.5f)
+					{
+						const float Cycle = FMath::Max(LocoClips[0].Gait.CycleDuration(), 0.1f);
+						GaitPhase = FMath::Frac((Side == 0 ? 0.0f : 0.5f) + Back / Cycle);
+						bFound = true;
+						break;
+					}
+				}
+				if (bFound)
+				{
+					break;
+				}
+			}
+		}
+	}
+	State.LoopAlpha = FMath::Clamp(State.LoopAlpha + (bWantLoops ? 1.0f : -1.0f) * DeltaSeconds / LoopBlendSeconds, 0.0f, 1.0f);
+	if (State.LoopAlpha <= 0.0f && !bWantLoops)
+	{
+		State.bLoopPhaseSynced = false;
+	}
+	if (State.LoopAlpha >= 1.0f)
+	{
+		State.Layers.Reset();
+	}
+	MotionLoopAlpha = State.LoopAlpha;
+	float LoopStride = 1.0f;
+	float LoopLift = 1.0f;
+	float LoopFootSpeed = 0.0f;
+	const FVector TravelCS = Mesh->GetComponentTransform().InverseTransformVectorNoScale(FVector(Comp->MassVelocity.X, Comp->MassVelocity.Y, 0.0));
+	if (State.LoopAlpha > 0.0f)
+	{
+		UpdateLocomotion(DeltaSeconds, SmoothedSpeed, SmoothedDirection);
+		for (FRammsCrowdPoseSample& Sample : Frame.Locomotion)
+		{
+			Sample.Weight *= State.LoopAlpha;
+		}
+		LoopStride = StrideScale;
+		LoopLift = FootLiftScale;
+		LoopFootSpeed = FootSpeedCmS;
+	}
+
 	if (State.Layers.IsEmpty())
 	{
-		// Nothing selected yet (no pose recorded): use the blended clips this frame.
 		Frame.PoseHistory = &State.History;
 		Frame.bResetPoseHistory = State.bResetHistory;
 		State.bResetHistory = false;
+		bMotionTransitionClip = false;
+		if (State.LoopAlpha > 0.0f)
+		{
+			// The plain blended walk, between motion-matched transitions.
+			bMotionMatching = true;
+			MotionClipTravel = TravelCS;
+			return true;
+		}
+		// Nothing selected yet (no pose recorded): use the blended clips this frame.
 		bMotionMatching = false;
 		MotionClipTravel = FVector::ZeroVector;
 		return false;
@@ -714,15 +832,16 @@ bool URammsCrowdAnimInstance::UpdateMotionMatching(const float DeltaSeconds)
 	const float Ease = 1.0f - FMath::Exp(-DeltaSeconds / 0.08f);
 	State.Stride += (WantStride - State.Stride) * Ease;
 	State.Lift += (WantLift - State.Lift) * Ease;
-	StrideScale = State.Stride;
-	FootLiftScale = State.Lift;
-	FootSpeedCmS = RootSpeed * LocomotionPlayRate * StrideScale;
+	StrideScale = FMath::Lerp(State.Stride, LoopStride, State.LoopAlpha);
+	FootLiftScale = FMath::Lerp(State.Lift, LoopLift, State.LoopAlpha);
+	FootSpeedCmS = FMath::Lerp(RootSpeed * LocomotionPlayRate * State.Stride, LoopFootSpeed, State.LoopAlpha);
+	MotionClipTravel = FMath::Lerp(MotionClipTravel, TravelCS, State.LoopAlpha);
 	for (FRammsCrowdMotionMatching::FLayer& Layer : State.Layers)
 	{
 		const float Length = Layer.Sequence->GetPlayLength();
 		Layer.Time += &Layer == &Current ? CurrentAdvance : DeltaSeconds * LocomotionPlayRate;
 		Layer.Time = Layer.bLooping ? FMath::Fmod(Layer.Time, FMath::Max(Length, 0.01f)) : FMath::Min(Layer.Time, Length);
-		Frame.Locomotion.Add({ Layer.Sequence, Layer.Time, Layer.Weight });
+		Frame.Locomotion.Add({ Layer.Sequence, Layer.Time, Layer.Weight * (1.0f - State.LoopAlpha) });
 	}
 	Frame.LocomotionAlpha = 1.0f;
 	LocomotionAlpha = 1.0f;

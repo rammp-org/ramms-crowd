@@ -310,6 +310,25 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Ramms|Crowd|Motion Matching", meta = (ClampMin = "0.0"))
 	float MotionMatchingStandSpeedCmS = 25.0f;
 
+	/**
+	 * Below this speed no clip walks: a pedestrian held up by someone in front (or
+	 * shuffling under avoidance) stops and stands rather than walking in place with
+	 * the feet dragged along, cm/s. The prediction is made from the speed the body
+	 * is managing, not from the speed it would like, so being blocked reads as a stop.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Ramms|Crowd|Motion Matching", meta = (ClampMin = "0.0"))
+	float MotionMatchingWalkSpeedCmS = 60.0f;
+
+	/**
+	 * Steady walking uses the per-body walk and directional clips blended to the
+	 * agent's speed (the same as with motion matching off), and motion matching only
+	 * supplies the starts, stops and turns in place. The crowd's own loops are made for
+	 * these bodies at their walking speed; the motion-matched walk is retargeted and
+	 * authored at a brisker pace. The Move databases are then not searched.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Ramms|Crowd|Motion Matching")
+	bool bBlendedWalkLoops = true;
+
 	/** Seconds between searches (the current clip keeps playing in between). */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Ramms|Crowd|Motion Matching", meta = (ClampMin = "0.0"))
 	float MotionMatchingSearchInterval = 0.1f;

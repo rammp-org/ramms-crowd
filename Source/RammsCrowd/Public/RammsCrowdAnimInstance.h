@@ -198,6 +198,14 @@ public:
 	/** Motion matching is playing a start or stop clip (game thread). */
 	bool bMotionTransitionClip = false;
 
+	/** Debug: share of the pose coming from the blended walk loops (bBlendedWalkLoops). */
+	UPROPERTY(BlueprintReadOnly, Category = "Ramms|Crowd")
+	float MotionLoopAlpha = 0.0f;
+
+	/** Debug: speed the trajectory prediction aims at (what the body is managing), cm/s. */
+	UPROPERTY(BlueprintReadOnly, Category = "Ramms|Crowd")
+	float MotionTargetSpeed = 0.0f;
+
 	/** Motion matching: the playing clips' root velocity in component space (game thread). */
 	FVector MotionClipTravel = FVector::ZeroVector;
 
@@ -250,6 +258,9 @@ private:
 	float GaitPhase = 0.0f;
 	float SmoothedSpeed = 0.0f;
 	float SmoothedDirection = 0.0f;
+	/** Last frame's speed along the path and its smoothed rate of change (trajectory prediction). */
+	float PreviousPathSpeed = 0.0f;
+	float PathAcceleration = 0.0f;
 
 	const UAnimSequence* IdleSequence = nullptr;
 	float IdleTime = 0.0f;

@@ -122,9 +122,29 @@ layer on top unchanged.
   moment is searched, so costs from different schemas never compete. The set
   is chosen from the current speed and the predicted speed 1 s ahead.
 - **Prediction**: the path eases from the current velocity onto the lane Mass
-  is following (`TrajectoryResponseSeconds`), at its desired speed. It slows to
-  a stop when the pedestrian will stand at its goal, and the pedestrian turns to
-  face the direction it walks.
+  is following (`TrajectoryResponseSeconds`). The speed it aims at is what the
+  body is managing: its speed along the path plus the acceleration it is getting,
+  within the path's desired speed. (Aiming at the desired speed itself kept a
+  pedestrian held up by someone in front walking in place, feet dragged along;
+  Epic's own Mass trajectory processors predict from the post-avoidance velocity
+  for the same reason.) Below `MotionMatchingWalkSpeedCmS` (60) no clip walks, so
+  a held-up or shuffling pedestrian stops and stands. The path slows to a stop
+  when the pedestrian will stand at its goal, and the pedestrian turns to face the
+  direction it walks.
+- **Steady walking from the blended loops** (`bBlendedWalkLoops`, on). The crowd's
+  own walk and directional loops are made for these bodies at their walking speed
+  (140 cm/s), while the motion-matched walk is retargeted from the mannequin and
+  authored at 165 cm/s, so it always played slowed and stride-shortened. With this
+  on, the `Move` databases are not searched: motion matching supplies the starts,
+  stops and turns in place, and the Move phase cross-fades (0.15 s) to the same
+  blended loops the non-motion-matched path uses. A start clip plays out first;
+  a stop the pedestrian walks on from hands over at once. The loops' gait phase is
+  synced to the clip they follow (phase 0 is the left heel strike, the loops' `L`
+  marker and the GASP contact curves' rising edge; a stop pose, both feet down,
+  restarts at the left heel strike so the right foot leaves first). The loops
+  disable orientation warping (their directional blend already faces the travel)
+  and are foot-locked like everything else. Debug: `MotionLoopAlpha`,
+  `MotionTargetSpeed`.
 - **Playback**: searches run every `MotionMatchingSearchInterval` and when the
   set changes or a one-shot clip runs out. New clips cross-fade over
   `MotionMatchingBlendSeconds`. Playback is scaled toward the agent's speed
