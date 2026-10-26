@@ -274,7 +274,8 @@ vocabulary to compose from:
 | `RAMMS Stimulus Zone` (`FRammsStimulusZoneCondition`) | condition | zone ≥ MinZone (invertible) |
 | `RAMMS Closing Speed` (`FRammsClosingSpeedCondition`) | condition | approach speed ≥ threshold |
 | `RAMMS Back Away` (`FRammsBackAwayTask`) | task | retreat along AwayDirection while facing the stimulus, lane-safe distances |
-| `RAMMS Stand At Path End` (`FRammsStandAtPathEndTask`) | task | marks a ZoneGraph path target (bind the wander target, between it and Path Follow) as ending in a stand. The engine's wander target ends paths with a Move intent, so Mass applies no arrival slowdown: agents hit the goal at full speed, overshoot and creep back. `ST_Pedestrian`'s Wander state uses it because Stand always follows |
+| `RAMMS Stand At Path End` (`FRammsStandAtPathEndTask`) | task | marks a ZoneGraph path target (bind the wander target, between it and Path Follow) as ending in a stand. The engine's wander target ends paths with a Move intent, so Mass applies no arrival slowdown: agents hit the goal at full speed, overshoot and creep back. `StandChance` (0..1, default 1) makes that a random choice per walk, and the `StandAtEnd` output tells the state's transitions which way it went; `ST_Pedestrian` uses 0.35, so each 5 m wander leg usually walks straight on into the next and about one in three ends in a pause |
+| `RAMMS Random Duration` (`FRammsRandomDurationTask`) | task | picks a duration between `MinSeconds` and `MaxSeconds` on entering the state, for a later task in the same state to bind (`ST_Pedestrian`'s Stand binds it to ZG Stand's Duration: 2–8 s pauses) |
 | engine: ZG Find Wander Target / Path Follow / Stand, LookAt, Find Escape Target, NavMesh tasks | tasks | locomotion + gaze building blocks |
 
 Recipes:
