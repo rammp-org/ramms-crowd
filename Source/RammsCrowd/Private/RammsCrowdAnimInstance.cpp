@@ -510,6 +510,29 @@ bool URammsCrowdAnimInstance::UpdateMotionMatching(const float DeltaSeconds)
 		}
 		AddSample(Step * 0.1f, At, FQuat(FVector::UpVector, FMath::DegreesToRadians(FacingYaw)));
 	}
+	// The trajectory Mass generated (UE 5.8 Character Trajectory Generation trait, fed
+	// by the Spring Movement trait) replaces the built-in prediction when the entity
+	// has one: the body then moves along the very path the pose was matched to.
+	bMassTrajectoryUsed = AnimSet->bUseMassTrajectory && Comp->bHasMassTrajectory;
+	if (bMassTrajectoryUsed)
+	{
+		Trajectory = Comp->MassTrajectory;
+		const auto SpeedBetween = [&Trajectory](const float T0, const float T1)
+		{
+			const FTransformTrajectorySample A = Trajectory.GetSampleAtTime(T0);
+			const FTransformTrajectorySample B = Trajectory.GetSampleAtTime(T1);
+			return static_cast<float>(FVector::Dist2D(A.Position, B.Position) / FMath::Max(T1 - T0, 1.0e-3f));
+		};
+		// Speed0 stays the body's actual speed; the trajectory gives the outlook.
+		Speed1 = SpeedBetween(0.9f, 1.0f);
+		FacingYaw = static_cast<float>(Trajectory.Samples.Last().Facing.Rotator().Yaw);
+		MotionTargetSpeed = SpeedBetween(1.4f, 1.5f);
+		if (Speed0 < WalkSpeed && Speed1 < WalkSpeed)
+		{
+			// Shuffling, held up or creeping: standing as far as the clips are concerned.
+			Speed0 = 0.0f;
+		}
+	}
 	State.History.SetTrajectory(Trajectory);
 
 	// What the pedestrian is doing picks the databases to search, like GASP's chooser.
