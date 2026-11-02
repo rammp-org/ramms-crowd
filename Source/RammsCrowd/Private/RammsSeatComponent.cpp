@@ -76,7 +76,7 @@ void URammsSeatComponent::PreEditChange(FProperty* PropertyAboutToChange)
 {
 	// Deliberately skip UActorComponent::PreEditChange. It wraps every details-panel
 	// edit in a full component re-register, and the matching PostEditChange then calls
-	// RerunConstructionScripts() on the owner — on a live physics-assembled pawn (MeBot:
+	// RerunConstructionScripts() on the owner — on a live physics-assembled pawn (RAMMP Gen1:
 	// simulated vehicle root + constraint-welded arm/gripper) that destroys and recreates
 	// every blueprint component mid-PIE, scattering the arm and killing the occupant
 	// (unregister fires EndPlay). None of this component's properties need any of that:

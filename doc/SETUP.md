@@ -209,7 +209,7 @@ Why spawned actors follow entities at all: the engine only teleports a represent
 actor once, at the swap moment. `URammsCrowdActorSyncProcessor` (this plugin) pushes
 entity transforms to Mass-owned representation actors every frame.
 
-## 6. Player / robot setup (`BP_Mebot_Ramms`)
+## 6. Player / robot setup (`BP_RammpGen1_Ramms`)
 
 Two components on the pawn:
 
@@ -219,7 +219,7 @@ Two components on the pawn:
      require a capsule + CharacterMovement, which robot pawns don't have; the paired
      translator mirrors the pawn's transform/velocity into Mass every frame.
      `bAutoFootprint` (on) fits the collider to the pawn's physically colliding
-     components on the first sync (MeBot: about 120 x 71 cm, centred 28 cm behind the
+     components on the first sync (RAMMP Gen1: about 120 x 71 cm, centred 28 cm behind the
      root) and places the entity at the footprint centre; radius / half-length are
      the fallback. `bKeepCrowdClear` (on) makes the footprint solid for crowd agents:
      `URammsRobotClearanceProcessor` moves agents out of it after Mass movement and
