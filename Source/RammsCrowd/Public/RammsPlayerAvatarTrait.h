@@ -58,12 +58,12 @@ struct FRammsAvatarSyncFragment : public FMassFragment
 };
 
 /**
- * Makes an actor-backed Mass entity (created by UMassAgentComponent on e.g. the MeBot
+ * Makes an actor-backed Mass entity (created by UMassAgentComponent on e.g. the RAMMP Gen1
  * wheelchair pawn) visible to crowd avoidance: transform, velocity, agent radius, and
  * avoidance collider, synced actor->Mass every frame by URammsPlayerAvatarTranslator.
  *
  * Unlike the engine's capsule/character sync traits this works for any pawn — the
- * MeBot's root is a physics-driven skeletal mesh with no capsule or CharacterMovement.
+ * RAMMP Gen1's root is a physics-driven skeletal mesh with no capsule or CharacterMovement.
  * Pair with UMassNavigationObstacleTrait (avoidance grid) and UMassLookAtTargetTrait
  * (gaze target) in the player avatar entity config.
  */

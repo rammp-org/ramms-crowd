@@ -414,7 +414,7 @@ the chair, whatever the occupant's build. All locations are in seat space
   a heavy one). City Sample builds share one joint layout but differ in flesh,
   so this is what keeps a hand on the lap rather than in it.
 
-`BP_Mebot_Ramms` in RAMMS-Sim carries a worked fit for the MeBot: left hand on
+`BP_RammpGen1_Ramms` in RAMMS-Sim carries a worked fit for the RAMMP Gen1: left hand on
 the joystick module, right hand resting in the lap (the robot arm owns the
 right armrest), feet on the front of the base (there are no footplates). The
 right hand's relaxed finger curl is ordinary `PoseBoneOffsets` entries, taken
