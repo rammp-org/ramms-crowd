@@ -55,6 +55,43 @@ struct RAMMSCROWD_API FRammsSeatLimbTarget
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Ramms|Seat|Fit")
 	ERammsSeatLimbEndRotation EndRotation = ERammsSeatLimbEndRotation::FollowLimb;
 
+	/**
+	 * Rest the elbow or knee on something (an elbow on the armrest) instead of
+	 * bending it toward PoleLocation. The joint goes to MidJointRest's height and
+	 * side position, sliding fore or aft along the seat (up to MidJointRestSlide)
+	 * to wherever the upper arm or thigh reaches it, ahead of the shoulder or hip.
+	 * The hand or foot then heads toward Location and lands at Location's height
+	 * (hanging straight down where that is more than the forearm or shin below):
+	 * a hand in the lap stays on the lap, a little further forward or back with
+	 * the occupant's proportions.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Ramms|Seat|Fit")
+	bool bRestMidJoint = false;
+
+	/** Where the elbow or knee joint rests, in seat space: the top of what it rests on plus the flesh under the joint. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Ramms|Seat|Fit", meta = (EditCondition = "bRestMidJoint"))
+	FVector MidJointRest = FVector::ZeroVector;
+
+	/**
+	 * How far (cm) the joint may slide fore or aft from MidJointRest along what it
+	 * rests on. An upper arm or thigh too short to reach that stretch stops just
+	 * short of its nearest end, above the rest; one that reaches beyond it keeps
+	 * the joint at the rest's height, a little past the end.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Ramms|Seat|Fit", meta = (EditCondition = "bRestMidJoint", ClampMin = "0.0"))
+	float MidJointRestSlide = 12.0f;
+
+	/**
+	 * Where the joint cannot reach its rest (a tall occupant's shoulder high above
+	 * a low armrest), the upper arm's parent (the clavicle) may swing up to this
+	 * far (degrees) about the seat's forward axis to bring it there: the shoulder
+	 * drops just enough for the elbow to rest, scaled by Weight. Arms only: a
+	 * parent that carries the whole body (a thigh's pelvis, or the root bone) is
+	 * never swung, so this does nothing for a leg. 0 keeps the parent as posed.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Ramms|Seat|Fit", meta = (EditCondition = "bRestMidJoint", ClampMin = "0.0", ClampMax = "45.0"))
+	float MidJointRestParentSwing = 0.0f;
+
 	/** 0 keeps the base pose, 1 reaches the target. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Ramms|Seat|Fit", meta = (ClampMin = "0.0", ClampMax = "1.0"))
 	float Weight = 1.0f;
