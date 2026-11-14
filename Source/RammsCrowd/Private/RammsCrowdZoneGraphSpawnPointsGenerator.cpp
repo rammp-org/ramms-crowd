@@ -7,6 +7,7 @@
 #include "RammsCrowdLog.h"
 #include "ZoneGraphData.h"
 #include "ZoneGraphQuery.h"
+#include "ZoneGraphSettings.h"
 #include "ZoneGraphSubsystem.h"
 
 void URammsCrowdZoneGraphSpawnPointsGenerator::Generate(UObject& QueryOwner, TConstArrayView<FMassSpawnedEntityType> EntityTypes, int32 Count, FFinishedGeneratingSpawnDataSignature& FinishedGeneratingSpawnPointsDelegate) const
@@ -94,11 +95,27 @@ void URammsCrowdZoneGraphSpawnPointsGenerator::GeneratePointsForZoneGraphData(co
 	const float				 EffectiveMinGap = FMath::Max(MinGapCm, 1.0f);
 	const float				 EffectiveMaxGap = FMath::Max(MaxGapCm, EffectiveMinGap);
 	const FZoneGraphStorage& ZoneGraphStorage = ZoneGraphData.GetStorage();
+	// The traffic's vehicle lanes (when the project defines the tag) are never spawn lanes.
+	FZoneGraphTag Excluded;
+	if (!ExcludeLaneTagName.IsNone())
+	{
+		if (const UZoneGraphSettings* Settings = GetDefault<UZoneGraphSettings>())
+		{
+			for (const FZoneGraphTagInfo& Info : Settings->GetTagInfos())
+			{
+				if (Info.IsValid() && Info.Name == ExcludeLaneTagName)
+				{
+					Excluded = Info.Tag;
+					break;
+				}
+			}
+		}
+	}
 
 	for (int32 LaneIndex = 0; LaneIndex < ZoneGraphStorage.Lanes.Num(); ++LaneIndex)
 	{
 		const FZoneLaneData& Lane = ZoneGraphStorage.Lanes[LaneIndex];
-		if (LaneTagFilter.Pass(Lane.Tags) == false)
+		if (LaneTagFilter.Pass(Lane.Tags) == false || (Excluded.IsValid() && Lane.Tags.Contains(Excluded)))
 		{
 			continue;
 		}

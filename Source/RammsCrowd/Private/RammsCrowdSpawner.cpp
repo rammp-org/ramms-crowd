@@ -275,6 +275,7 @@ UMassEntitySpawnDataGeneratorBase* ARammsCrowdSpawner::BuildSpawnGenerator() con
 			Generator->MinGapCm = ZoneGraphSpawnSettings.MinGapCm;
 			Generator->MaxGapCm = ZoneGraphSpawnSettings.MaxGapCm;
 			Generator->bAlignToLaneDirection = ZoneGraphSpawnSettings.bAlignToLaneDirection;
+			Generator->ExcludeLaneTagName = ZoneGraphSpawnSettings.ExcludeLaneTagName;
 			return Generator;
 		}
 

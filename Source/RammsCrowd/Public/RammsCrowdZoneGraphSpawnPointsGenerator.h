@@ -29,6 +29,10 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ZoneGraph Generator")
 	bool bAlignToLaneDirection = true;
 
+	/** Lanes with the ZoneGraph tag of this name are never spawn lanes (the traffic's vehicle lanes). None: no lane is excluded. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ZoneGraph Generator")
+	FName ExcludeLaneTagName = FName(TEXT("Vehicle"));
+
 private:
 	void GeneratePointsForZoneGraphData(const AZoneGraphData& ZoneGraphData, TArray<FTransform>& OutTransforms, const FRandomStream& RandomStream) const;
 };

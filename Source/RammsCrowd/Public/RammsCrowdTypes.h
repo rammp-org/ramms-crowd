@@ -69,6 +69,10 @@ struct RAMMSCROWD_API FRammsCrowdZoneGraphSpawnSettings
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Crowd")
 	bool bAlignToLaneDirection = true;
+
+	/** Lanes with the ZoneGraph tag of this name are never spawn lanes (the traffic's vehicle lanes). None: no lane is excluded. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Crowd")
+	FName ExcludeLaneTagName = FName(TEXT("Vehicle"));
 };
 
 UCLASS(BlueprintType)
