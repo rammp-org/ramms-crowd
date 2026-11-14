@@ -28,6 +28,8 @@ struct FRammsSeatLimbSolve
 	float	MidRestSlide = 0.0f;
 	/** How far (degrees) the upper bone's parent may swing about the seat's forward axis for the joint to reach MidRest. */
 	float MidRestParentSwing = 0.0f;
+	/** How far inside reach of the rest's line that swing brings the joint (0.5 cm in seat space). */
+	float MidRestMargin = 0.5f;
 };
 
 /** Upper-body motion for the proxy: angles in degrees about the seat's axes (given in component space). */
@@ -81,22 +83,28 @@ public:
 	static void SolveLimb(FTransform& Upper, FTransform& Lower, FTransform& End, const FVector& Effector, const FVector& Pole, bool bKeepEndRotation);
 
 	/**
-	 * Pure: rests a two-bone chain's middle joint on MidRest -- at its height (along Up) and side position
-	 * (along Right), sliding along Forward up to Slide to keep the upper bone's length -- then points the lower
-	 * bone toward Effector, its end landing at Effector's height where the lower bone reaches. Where the upper
-	 * bone cannot reach the rest's line the joint goes as near it as it reaches. Weight below 1 blends from the
-	 * chain's current pose. Positions, rotations and axes in one space; bone lengths are kept.
+	 * Pure: rests a two-bone chain's middle joint on the rest's line -- MidRest's height (along Up) and side
+	 * position (along Right), running along Forward -- at the upper bone's length, ahead of the upper bone's root
+	 * (behind it only once that root is past the line's stretch within Slide of MidRest). Where the upper bone
+	 * reaches beyond that stretch the joint stays on the line a little past its end; where it is too short to
+	 * reach the stretch the joint goes toward the stretch's nearest point, as far as the bone reaches. The lower
+	 * bone then heads toward Effector, its end landing at Effector's height (hanging straight toward that height
+	 * where it is more than the lower bone's length away). Continuous in all its inputs except as the root passes
+	 * over the stretch's front end, or Effector passes right under the joint within the lower bone's reach. Weight
+	 * below 1 blends from the chain's current pose. Positions, rotations and axes in one space; bone lengths are kept.
 	 */
 	static void SolveLimbOnRest(FTransform& Upper, FTransform& Lower, FTransform& End, const FVector& MidRest, float Slide, const FVector& Effector,
 		const FVector& Forward, const FVector& Right, const FVector& Up, bool bKeepEndRotation, float Weight = 1.0f);
 
 	/**
 	 * Pure: the angle (degrees, about Forward through ParentPos, at most MaxDegrees either way) to swing the upper
-	 * bone's parent so that the upper bone, UpperLength long from UpperPos, just reaches MidRest's line (its height
-	 * and side position, along Forward). 0 when it already reaches; MaxDegrees (signed) when even that does not.
+	 * bone's parent so that the upper bone, UpperLength long from UpperPos, just reaches the rest: the stretch of
+	 * MidRest's line (its height and side position, along Forward) within Slide of MidRest, and Margin inside reach
+	 * of the line itself. 0 when it already reaches; MaxDegrees (signed) when even that does not. Scaled by Weight
+	 * (a limb only partly placed swings its parent that share of the way).
 	 */
-	static float ParentSwingToRest(const FVector& ParentPos, const FVector& UpperPos, double UpperLength, const FVector& MidRest, const FVector& Forward,
-		float MaxDegrees);
+	static float ParentSwingToRest(const FVector& ParentPos, const FVector& UpperPos, double UpperLength, const FVector& MidRest, float Slide,
+		const FVector& Forward, float MaxDegrees, float Margin = 0.5f, float Weight = 1.0f);
 
 	/** Current passive lean (degrees) and head turn, for debugging and tests. */
 	UPROPERTY(BlueprintReadOnly, Category = "Ramms|Seat")

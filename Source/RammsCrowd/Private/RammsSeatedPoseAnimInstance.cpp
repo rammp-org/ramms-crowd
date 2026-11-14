@@ -104,6 +104,11 @@ void URammsSeatedPoseAnimInstance::NativeUpdateAnimation(const float DeltaSecond
 		Fit.PelvisLocation = SeatToComponent.TransformPosition(SeatComp->PelvisLocation + Adjust.Pelvis);
 	}
 
+	// Seat-space lengths in the mesh's component space, scaled as the seat-space points are: along the seat's
+	// forward axis (a rest's slide), and across it (a rest's reach margin).
+	const double AlongScale = SeatToComponent.TransformVector(FVector::ForwardVector).Size();
+	const double AcrossScale = 0.5 * (SeatToComponent.TransformVector(FVector::RightVector).Size() + SeatToComponent.TransformVector(FVector::UpVector).Size());
+
 	const FRammsSeatLimbTarget* Targets[4] = { &SeatComp->LeftHand, &SeatComp->RightHand, &SeatComp->LeftFoot, &SeatComp->RightFoot };
 	static const FName Chains[4][3] = {
 		{ TEXT("upperarm_l"), TEXT("lowerarm_l"), TEXT("hand_l") },
@@ -130,8 +135,9 @@ void URammsSeatedPoseAnimInstance::NativeUpdateAnimation(const float DeltaSecond
 		Limb.Weight = Target.Weight;
 		Limb.bRestMid = Target.bRestMidJoint;
 		Limb.MidRest = SeatToComponent.TransformPosition(Target.MidJointRest);
-		Limb.MidRestSlide = Target.MidJointRestSlide;
+		Limb.MidRestSlide = static_cast<float>(FMath::Max(Target.MidJointRestSlide, 0.0f) * AlongScale);
 		Limb.MidRestParentSwing = Target.MidJointRestParentSwing;
+		Limb.MidRestMargin = static_cast<float>(0.5 * AcrossScale);
 	}
 
 	UpdateMotion(*SeatComp, SeatToComponent, DeltaSeconds);
@@ -356,45 +362,47 @@ void URammsSeatedPoseAnimInstance::SolveLimbOnRest(FTransform& Upper, FTransform
 		return;
 	}
 
-	// The joint on the rest's line (its height and side position, any way fore or aft)
-	// at the upper bone's length from the shoulder or hip: of the two places that are,
-	// the one nearer the rest, as far as the slide allows.
+	// The rest's line runs along Forward through MidRest (its height and side position); the joint aims for the
+	// stretch of it within Slide of MidRest. Positions along it are measured from MidRest.
+	const double  SlideLimit = FMath::Max(static_cast<double>(Slide), 0.0);
 	const FVector FromRest = UpperPos - MidRest;
 	const double  Fore = FromRest | Forward;
 	const double  Side = FromRest | Right;
 	const double  Height = FromRest | Up;
-	const double  Reach = FMath::Square(UpperLength) - FMath::Square(Side) - FMath::Square(Height);
+	const double  Nearest = FMath::Clamp(Fore, -SlideLimit, SlideLimit);
 	FVector		  Mid;
-	if (Reach >= 0.0)
+	if (FMath::Square(Fore - Nearest) + FMath::Square(Side) + FMath::Square(Height) > FMath::Square(UpperLength))
 	{
-		const double Root = FMath::Sqrt(Reach);
-		const double Along = FMath::Abs(Fore + Root) <= FMath::Abs(Fore - Root) ? Fore + Root : Fore - Root;
-		const double Slid = FMath::Clamp(Along, -static_cast<double>(Slide), static_cast<double>(Slide));
-		Mid = MidRest + Forward * Slid;
-		if (Slid != Along)
-		{
-			// Past the end of what it rests on: the bone's length toward that end.
-			Mid = UpperPos + (Mid - UpperPos).GetSafeNormal() * UpperLength;
-		}
+		// The upper bone is too short to reach that stretch: toward its nearest point, as far as it reaches (the
+		// joint stops just short of the rest). On the boundary this is the point on the line below, so nothing jumps.
+		Mid = UpperPos + (MidRest + Forward * Nearest - UpperPos).GetSafeNormal() * UpperLength;
 	}
 	else
 	{
-		// Too short (or the rest too far out) to reach its line: as near it as it reaches.
-		Mid = UpperPos + (MidRest - UpperPos).GetSafeNormal() * UpperLength;
+		// On the line at the bone's length. Of the two places that are, the one ahead of the shoulder or hip: one
+		// choice throughout, so nothing flips as the trunk sways (a seated trunk leans on the backrest, so the joint
+		// does not rest far behind it). Only with the shoulder ahead of the stretch's front end, the one behind it
+		// (the flip is there, a slide's length ahead of the rest, not over the rest). Always at the rest's height:
+		// where the bone reaches beyond the stretch the joint stays on the line a little past its end rather than
+		// going into the rest.
+		const double Root = FMath::Sqrt(FMath::Max(FMath::Square(UpperLength) - FMath::Square(Side) - FMath::Square(Height), 0.0));
+		Mid = MidRest + Forward * (Fore <= SlideLimit ? Fore + Root : Fore - Root);
 	}
 
-	// The end toward Effector, at its height: the forearm laid down onto the lap.
+	// The end lands at Effector's height heading toward it (ahead, right above or below it): the forearm laid down
+	// onto the lap, a little short of or past Effector. Where that height is more than the lower bone's length away
+	// it hangs straight toward it, as far as it reaches -- the same place where the two meet, so nothing jumps.
 	const FVector ToEffector = Effector - Mid;
 	const double  Drop = ToEffector | Up;
-	const FVector Level = ToEffector - Up * Drop;
 	FVector		  EndAt;
-	if (FMath::Abs(Drop) <= LowerLength && !Level.IsNearlyZero())
+	if (FMath::Abs(Drop) < LowerLength)
 	{
-		EndAt = Mid + Level.GetSafeNormal() * FMath::Sqrt(FMath::Square(LowerLength) - FMath::Square(Drop)) + Up * Drop;
+		const FVector Heading = (ToEffector - Up * Drop).GetSafeNormal(UE_SMALL_NUMBER, Forward);
+		EndAt = Mid + Heading * FMath::Sqrt(FMath::Square(LowerLength) - FMath::Square(Drop)) + Up * Drop;
 	}
 	else
 	{
-		EndAt = Mid + ToEffector.GetSafeNormal() * LowerLength;
+		EndAt = Mid + Up * (Drop < 0.0 ? -LowerLength : LowerLength);
 	}
 
 	if (Weight < 1.0f)
@@ -408,32 +416,40 @@ void URammsSeatedPoseAnimInstance::SolveLimbOnRest(FTransform& Upper, FTransform
 }
 
 float URammsSeatedPoseAnimInstance::ParentSwingToRest(const FVector& ParentPos, const FVector& UpperPos, const double UpperLength, const FVector& MidRest,
-	const FVector& Forward, const float MaxDegrees)
+	const float Slide, const FVector& Forward, const float MaxDegrees, const float Margin, const float Weight)
 {
-	// Distance from the shoulder, the parent swung by Degrees, to the rest's line.
-	auto Off = [&](const double Degrees) {
+	const double SlideLimit = FMath::Max(static_cast<double>(Slide), 0.0);
+	const double Inside = FMath::Max(static_cast<double>(Margin), 0.0);
+	// How far (cm) the shoulder, the parent swung by Degrees, is from reaching its rest; 0 or less once it does. The
+	// joint must reach the stretch of the rest's line within Slide, and comes Margin inside reach of the line itself,
+	// so it lands on the line with room to slide rather than at the tangent (where it races fore and aft with the
+	// slightest motion of the shoulder).
+	auto Short = [&](const double Degrees) {
 		const FVector Swung = ParentPos + FQuat(Forward, FMath::DegreesToRadians(Degrees)).RotateVector(UpperPos - ParentPos);
 		const FVector FromRest = Swung - MidRest;
-		return (FromRest - Forward * (FromRest | Forward)).Size();
+		const double  Fore = FromRest | Forward;
+		const double  Line = (FromRest - Forward * Fore).Size();
+		const double  Stretch = FMath::Sqrt(FMath::Square(Fore - FMath::Clamp(Fore, -SlideLimit, SlideLimit)) + FMath::Square(Line));
+		return FMath::Max(Line - (UpperLength - Inside), Stretch - UpperLength);
 	};
-	// A little inside reach, so the joint lands on the line with room to slide rather than just touching it.
-	const double Want = UpperLength - 0.5;
-	if (MaxDegrees <= 0.0f || Off(0.0) <= Want)
+	if (MaxDegrees <= 0.0f || Weight <= 0.0f || Short(0.0) <= 0.0)
 	{
 		return 0.0f;
 	}
-	const double Sign = Off(1.0) <= Off(-1.0) ? 1.0 : -1.0;
-	if (Off(Sign * MaxDegrees) > Want)
+	const double Sign = Short(1.0) <= Short(-1.0) ? 1.0 : -1.0;
+	double		 Angle = MaxDegrees;
+	if (Short(Sign * MaxDegrees) <= 0.0)
 	{
-		return static_cast<float>(Sign * MaxDegrees);
+		double Lo = 0.0, Hi = MaxDegrees;
+		for (int32 Step = 0; Step < 30; ++Step)
+		{
+			const double Mid = 0.5 * (Lo + Hi);
+			(Short(Sign * Mid) > 0.0 ? Lo : Hi) = Mid;
+		}
+		Angle = Hi;
 	}
-	double Lo = 0.0, Hi = MaxDegrees;
-	for (int32 Step = 0; Step < 30; ++Step)
-	{
-		const double Mid = 0.5 * (Lo + Hi);
-		(Off(Sign * Mid) > Want ? Lo : Hi) = Mid;
-	}
-	return static_cast<float>(Sign * Hi);
+	// A limb only partly placed swings its parent that share of the way.
+	return static_cast<float>(Sign * Angle * FMath::Min(Weight, 1.0f));
 }
 
 void URammsSeatedPoseAnimInstance::PoseLimb(FTransform& Upper, FTransform& Lower, FTransform& End, const FVector& NewLower, const FVector& NewEnd, const bool bKeepEndRotation)
@@ -612,6 +628,7 @@ bool FRammsSeatedPoseProxy::Evaluate(FPoseContext& Output)
 	{
 		FCSPose<FCompactPose> ComponentPose;
 		ComponentPose.InitPose(Output.Pose);
+		const FCompactPoseBoneIndex Pelvis = Find(TEXT("pelvis"));
 		for (const FRammsSeatLimbSolve& Limb : Fit.Limbs)
 		{
 			if (!Limb.bEnabled)
@@ -625,18 +642,25 @@ bool FRammsSeatedPoseProxy::Evaluate(FPoseContext& Output)
 			{
 				continue;
 			}
+			// The target's bone before anything moves: a limb that cannot be placed leaves the pose as it is.
+			const FCompactPoseBoneIndex Relative = Find(Limb.RelativeToBone);
+			if (!Limb.RelativeToBone.IsNone() && Relative == INDEX_NONE)
+			{
+				continue;
+			}
 			if (Limb.bRestMid && Limb.MidRestParentSwing > 0.0f)
 			{
-				// Out of reach of its rest: drop the shoulder (swing the clavicle) just enough. Its children follow.
+				// Out of reach of its rest: drop the shoulder (swing the clavicle) just enough, by the limb's weight's
+				// share. Its children follow. Never a parent that carries the whole body (a thigh's pelvis, or the root).
 				const FCompactPoseBoneIndex Parent = Output.Pose.GetParentBoneIndex(Upper);
-				if (Parent != INDEX_NONE)
+				if (Parent != INDEX_NONE && !Parent.IsRootBone() && Parent.GetInt() != Pelvis.GetInt())
 				{
 					FTransform	  ParentT = ComponentPose.GetComponentSpaceTransform(Parent);
 					const FVector UpperPos = ComponentPose.GetComponentSpaceTransform(Upper).GetLocation();
 					const double  UpperLength = (ComponentPose.GetComponentSpaceTransform(Lower).GetLocation() - UpperPos).Size();
 					const FVector Forward = Fit.Motion.SeatForward.GetSafeNormal();
-					const float	  Swing = URammsSeatedPoseAnimInstance::ParentSwingToRest(ParentT.GetLocation(), UpperPos, UpperLength, Limb.MidRest, Forward,
-						  Limb.MidRestParentSwing);
+					const float	  Swing = URammsSeatedPoseAnimInstance::ParentSwingToRest(ParentT.GetLocation(), UpperPos, UpperLength, Limb.MidRest,
+						  Limb.MidRestSlide, Forward, Limb.MidRestParentSwing, Limb.MidRestMargin, Limb.Weight);
 					if (Swing != 0.0f)
 					{
 						ParentT.SetRotation((FQuat(Forward, FMath::DegreesToRadians(Swing)) * ParentT.GetRotation()).GetNormalized());
@@ -649,13 +673,8 @@ bool FRammsSeatedPoseProxy::Evaluate(FPoseContext& Output)
 			FTransform LowerT = ComponentPose.GetComponentSpaceTransform(Lower);
 			FTransform EndT = ComponentPose.GetComponentSpaceTransform(End);
 			FVector Target = Limb.Location;
-			if (!Limb.RelativeToBone.IsNone())
+			if (Relative != INDEX_NONE)
 			{
-				const FCompactPoseBoneIndex Relative = Find(Limb.RelativeToBone);
-				if (Relative == INDEX_NONE)
-				{
-					continue;
-				}
 				Target += ComponentPose.GetComponentSpaceTransform(Relative).GetLocation();
 			}
 			if (Limb.bRestMid)
