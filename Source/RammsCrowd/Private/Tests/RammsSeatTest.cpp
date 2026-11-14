@@ -92,4 +92,61 @@ bool FRammsSeatLimbTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsSeatLimbRestTest, "Ramms.Crowd.Seat.LimbRest",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRammsSeatLimbRestTest::RunTest(const FString& Parameters)
+{
+	// A right arm hanging from a shoulder at (0, 18, 75): 30 cm upper arm, 26 cm forearm.
+	const FTransform UpperStart(FQuat(FVector::RightVector, 0.2), FVector(0.0, 18.0, 75.0));
+	const FTransform LowerStart(FVector(0.0, 18.0, 45.0));
+	const FTransform EndStart(FVector(0.0, 18.0, 19.0));
+	const FVector	 Forward = FVector::ForwardVector, Right = FVector::RightVector, Up = FVector::UpVector;
+	const FVector	 Lap(25.0, 0.0, 38.0);
+
+	{
+		// An armrest line at y 28, z 47 (rest point x -4): within reach, so the elbow sits on it.
+		FTransform	  Upper = UpperStart, Lower = LowerStart, End = EndStart;
+		const FVector Rest(-4.0, 28.0, 47.0);
+		URammsSeatedPoseAnimInstance::SolveLimbOnRest(Upper, Lower, End, Rest, 12.0f, Lap, Forward, Right, Up, false);
+		const FVector Elbow = Lower.GetLocation(), Hand = End.GetLocation();
+		TestEqual(TEXT("upper length kept"), (Elbow - Upper.GetLocation()).Size(), 30.0, 0.1);
+		TestEqual(TEXT("lower length kept"), (Hand - Elbow).Size(), 26.0, 0.1);
+		TestEqual(TEXT("elbow at the rest's height"), Elbow.Z, 47.0, 0.1);
+		TestEqual(TEXT("elbow on the rest's line"), Elbow.Y, 28.0, 0.1);
+		TestTrue(TEXT("elbow slides no further than allowed"), FMath::Abs(Elbow.X - Rest.X) <= 12.0 + 0.1);
+		TestEqual(TEXT("hand at the lap's height"), Hand.Z, Lap.Z, 0.1);
+		const FVector2D Heading = FVector2D(Hand - Elbow).GetSafeNormal(), Wanted = FVector2D(Lap - Elbow).GetSafeNormal();
+		TestTrue(TEXT("forearm points at the lap"), (Heading | Wanted) > 0.999);
+	}
+	{
+		// The armrest well below the shoulder's reach: the elbow goes as near it as the arm reaches.
+		FTransform	  Upper = UpperStart, Lower = LowerStart, End = EndStart;
+		const FVector Rest(-4.0, 28.0, 30.0);
+		URammsSeatedPoseAnimInstance::SolveLimbOnRest(Upper, Lower, End, Rest, 12.0f, Lap, Forward, Right, Up, false);
+		const FVector Elbow = Lower.GetLocation();
+		TestEqual(TEXT("short arm: length kept"), (Elbow - Upper.GetLocation()).Size(), 30.0, 0.1);
+		TestTrue(TEXT("short arm: elbow above the rest, toward it"), Elbow.Z > Rest.Z && ((Elbow - Upper.GetLocation()).GetSafeNormal() | (Rest - Upper.GetLocation()).GetSafeNormal()) > 0.999);
+	}
+	{
+		// The shoulder 2 cm too high for the armrest: a clavicle from the neck at (0, 2, 77) swings just enough to drop it.
+		const FVector Neck(0.0, 2.0, 77.0), Shoulder(0.0, 18.0, 75.0), Rest(-4.0, 28.0, 47.0);
+		const float	  Swing = URammsSeatedPoseAnimInstance::ParentSwingToRest(Neck, Shoulder, 28.0, Rest, Forward, 20.0f);
+		const FVector Swung = Neck + FQuat(Forward, FMath::DegreesToRadians(Swing)).RotateVector(Shoulder - Neck);
+		const FVector FromRest = Swung - Rest;
+		TestTrue(TEXT("swing drops the shoulder"), Swung.Z < Shoulder.Z);
+		TestEqual(TEXT("swing brings the rest just within reach"), (FromRest - Forward * (FromRest | Forward)).Size(), 27.5, 0.05);
+		TestEqual(TEXT("in reach already: no swing"), URammsSeatedPoseAnimInstance::ParentSwingToRest(Neck, Shoulder, 40.0, Rest, Forward, 20.0f), 0.0f);
+		TestEqual(TEXT("out of reach even swung: the most allowed"), FMath::Abs(URammsSeatedPoseAnimInstance::ParentSwingToRest(Neck, Shoulder, 10.0, Rest, Forward, 20.0f)), 20.0f);
+	}
+	{
+		// Weight 0 leaves the chain as it was.
+		FTransform Upper = UpperStart, Lower = LowerStart, End = EndStart;
+		URammsSeatedPoseAnimInstance::SolveLimbOnRest(Upper, Lower, End, FVector(-4.0, 28.0, 47.0), 12.0f, Lap, Forward, Right, Up, false, 0.0f);
+		TestTrue(TEXT("weight 0: elbow unmoved"), Lower.GetLocation().Equals(LowerStart.GetLocation(), 0.01));
+		TestTrue(TEXT("weight 0: hand unmoved"), End.GetLocation().Equals(EndStart.GetLocation(), 0.01));
+	}
+	return true;
+}
+
 #endif

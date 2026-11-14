@@ -22,6 +22,12 @@ struct FRammsSeatLimbSolve
 	FVector Pole = FVector::ZeroVector;
 	bool bKeepEndRotation = false;
 	float Weight = 1.0f;
+	/** The middle joint rests at MidRest (sliding along the seat's forward axis up to MidRestSlide) instead of bending toward Pole. */
+	bool	bRestMid = false;
+	FVector MidRest = FVector::ZeroVector;
+	float	MidRestSlide = 0.0f;
+	/** How far (degrees) the upper bone's parent may swing about the seat's forward axis for the joint to reach MidRest. */
+	float MidRestParentSwing = 0.0f;
 };
 
 /** Upper-body motion for the proxy: angles in degrees about the seat's axes (given in component space). */
@@ -74,6 +80,24 @@ public:
 	/** Pure: puts a two-bone chain's end at Effector, bending toward Pole. Positions and rotations in one space. */
 	static void SolveLimb(FTransform& Upper, FTransform& Lower, FTransform& End, const FVector& Effector, const FVector& Pole, bool bKeepEndRotation);
 
+	/**
+	 * Pure: rests a two-bone chain's middle joint on MidRest -- at its height (along Up) and side position
+	 * (along Right), sliding along Forward up to Slide to keep the upper bone's length -- then points the lower
+	 * bone toward Effector, its end landing at Effector's height where the lower bone reaches. Where the upper
+	 * bone cannot reach the rest's line the joint goes as near it as it reaches. Weight below 1 blends from the
+	 * chain's current pose. Positions, rotations and axes in one space; bone lengths are kept.
+	 */
+	static void SolveLimbOnRest(FTransform& Upper, FTransform& Lower, FTransform& End, const FVector& MidRest, float Slide, const FVector& Effector,
+		const FVector& Forward, const FVector& Right, const FVector& Up, bool bKeepEndRotation, float Weight = 1.0f);
+
+	/**
+	 * Pure: the angle (degrees, about Forward through ParentPos, at most MaxDegrees either way) to swing the upper
+	 * bone's parent so that the upper bone, UpperLength long from UpperPos, just reaches MidRest's line (its height
+	 * and side position, along Forward). 0 when it already reaches; MaxDegrees (signed) when even that does not.
+	 */
+	static float ParentSwingToRest(const FVector& ParentPos, const FVector& UpperPos, double UpperLength, const FVector& MidRest, const FVector& Forward,
+		float MaxDegrees);
+
 	/** Current passive lean (degrees) and head turn, for debugging and tests. */
 	UPROPERTY(BlueprintReadOnly, Category = "Ramms|Seat")
 	float SwayPitchDegrees = 0.0f;
@@ -109,6 +133,9 @@ protected:
 
 private:
 	void UpdateMotion(const URammsSeatComponent& SeatComp, const FTransform& SeatToComponent, float DeltaSeconds);
+
+	/** Swings a two-bone chain so its middle and end joints land on NewLower and NewEnd (each at its bone's length). */
+	static void PoseLimb(FTransform& Upper, FTransform& Lower, FTransform& End, const FVector& NewLower, const FVector& NewEnd, bool bKeepEndRotation);
 
 	TWeakObjectPtr<URammsSeatComponent> Seat;
 	FRammsSeatFit Fit;
