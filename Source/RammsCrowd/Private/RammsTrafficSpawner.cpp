@@ -189,7 +189,7 @@ bool ARammsTrafficSpawner::SpawnTraffic()
 	{
 		Places.Swap(i, Rng.RandRange(0, i));
 	}
-	const int32 Wanted = VehicleCount > 0 ? VehicleCount : FMath::RoundToInt(DensityPerKm * LaneCm / 100000.0);
+	const int32 Wanted = VehicleCount > 0 ? VehicleCount : FMath::RoundToInt32(DensityPerKm * LaneCm / 100000.0);
 	const int32 Count = FMath::Min(Wanted, Places.Num());
 	if (Count <= 0)
 	{

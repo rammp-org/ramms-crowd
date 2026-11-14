@@ -87,7 +87,7 @@ namespace
 
 		static FIntPoint CellOf(const FVector2D& P)
 		{
-			return FIntPoint(FMath::FloorToInt(P.X / CellSize), FMath::FloorToInt(P.Y / CellSize));
+			return FIntPoint(FMath::FloorToInt32(P.X / CellSize), FMath::FloorToInt32(P.Y / CellSize));
 		}
 
 		void Add(const int32 Index, const FVector2D& P)
@@ -777,24 +777,24 @@ void URammsTrafficVehicleProcessor::Execute(FMassEntityManager& EntityManager, F
 		const FRammsTrafficDrivingParams& P = Ctx.GetConstSharedFragment<FRammsTrafficDrivingParams>();
 		Predict = FMath::Max(Predict, P.PredictSeconds);
 		const TConstArrayView<FRammsTrafficVehicleFragment> VehicleList = Ctx.GetFragmentView<FRammsTrafficVehicleFragment>();
-		const FRammsTrafficNetwork& Net = *F.Net;
+		const FRammsTrafficNetwork& Network = *F.Net;
 		for (FMassExecutionContext::FEntityIterator It = Ctx.CreateEntityIterator(); It; ++It)
 		{
 			const int32 Self = Dense++;
 			const FRammsTrafficVehicleFragment& V = VehicleList[It];
-			if (V.NetworkVersion != Net.Version || !Net.IsValidLane(V.Lane))
+			if (V.NetworkVersion != Network.Version || !Network.IsValidLane(V.Lane))
 			{
 				continue;
 			}
 			F.Occupancy[V.Lane].Add(FOccupant{ V.Distance, V.Speed, V.HalfLength, Self });
-			const FRammsTrafficLane& Lane = Net.Lanes[V.Lane];
+			const FRammsTrafficLane& Lane = Network.Lanes[V.Lane];
 			if (Lane.Zone != INDEX_NONE)
 			{
 				F.Claims[Lane.Zone].Add(FClaim{ V.Lane, Self });
 			}
-			else if (Net.IsValidLane(V.NextLane) && Net.Lanes[V.NextLane].Zone != INDEX_NONE)
+			else if (Network.IsValidLane(V.NextLane) && Network.Lanes[V.NextLane].Zone != INDEX_NONE)
 			{
-				const int32 Zone = Net.Lanes[V.NextLane].Zone;
+				const int32 Zone = Network.Lanes[V.NextLane].Zone;
 				if (V.bGranted)
 				{
 					F.Claims[Zone].Add(FClaim{ V.NextLane, Self });
