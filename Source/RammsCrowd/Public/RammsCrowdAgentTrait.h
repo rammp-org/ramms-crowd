@@ -42,6 +42,22 @@ struct RAMMSCROWD_API FRammsRobotContactFragment : public FMassFragment
 	int8 PassSide = 0;
 };
 
+/**
+ * A crowd member held at the start of a closed street crossing (URammsCrossingGateProcessor): the walking
+ * speed it had, given back when the crossing opens.
+ */
+USTRUCT()
+struct RAMMSCROWD_API FRammsCrossingWaitFragment : public FMassFragment
+{
+	GENERATED_BODY()
+
+	UPROPERTY()
+	float HeldSpeed = 0.0f;
+
+	UPROPERTY()
+	bool bHolding = false;
+};
+
 /** Per-archetype crowd profile data shared by all entities of one kind. */
 USTRUCT()
 struct RAMMSCROWD_API FRammsCrowdProfileParameters : public FMassConstSharedFragment

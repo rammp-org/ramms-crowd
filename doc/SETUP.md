@@ -43,6 +43,12 @@ For customizing appearance, animation, and behavior after setup, see
   - `[/Script/MassCrowd.MassCrowdSettings]` — `CrowdTag=Crowd`, `CrossingTag=Crossing`,
     one `LaneDensities` entry (DensityStd, weight 1). **An empty LaneDensities breaks
     density-weighted wander selection.**
+  - Traffic (README, "Traffic"): tags `Vehicle(6)`, `Intersection(7)`, `Signalized(8)`
+    and the profiles **VehicleLanes** / **VehicleLanesNarrow** (Vehicle bit only). Lanes
+    tagged `Crossing` are closed by MassCrowd until something opens them: in generated
+    levels only the crossings at signalized intersections carry it, and the traffic
+    signal clock opens them for Walk (`URammsCrossingGateProcessor` holds walkers at a
+    closed one).
 - `Config/DefaultMass.ini`
   - `[/Script/MassMovement.MassMovementSettings]` — movement styles `Walking`, `Jogging`,
     `RobotDrive`.
