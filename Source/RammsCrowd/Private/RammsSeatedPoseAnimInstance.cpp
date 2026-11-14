@@ -2,6 +2,7 @@
 
 #include "RammsSeatedPoseAnimInstance.h"
 
+#include "Animation/AnimNodeBase.h"
 #include "BonePose.h"
 #include "Engine/SkeletalMesh.h"
 #include "TwoBoneIK.h"
