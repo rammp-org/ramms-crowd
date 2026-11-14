@@ -270,9 +270,23 @@ void URammsTrafficSubsystem::BuildNetwork()
 	{
 		Signalized += Zone.bSignalized ? 1 : 0;
 	}
+	int32 DeadEnds = 0;
+	for (const FRammsTrafficLane& Lane : Network.Lanes)
+	{
+		if (Lane.Next.Num() == 0)
+		{
+			++DeadEnds;
+			UE_LOG(LogRammsCrowd, Verbose, TEXT("Traffic: lane %s ends at (%.0f, %.0f, %.0f) without a next vehicle lane."),
+				*Lane.Handle.ToString(), Lane.EndPosition.X, Lane.EndPosition.Y, Lane.EndPosition.Z);
+		}
+	}
 	if (!Network.IsEmpty())
 	{
-		UE_LOG(LogRammsCrowd, Display, TEXT("Traffic network v%d: %d vehicle lanes, %d intersections (%d signalized), %d lane conflicts."),
-			Network.Version, Network.Lanes.Num(), Network.Zones.Num(), Signalized, Conflicts);
+		UE_LOG(LogRammsCrowd, Display, TEXT("Traffic network v%d: %d vehicle lanes, %d intersections (%d signalized), %d lane conflicts, %d dead ends."),
+			Network.Version, Network.Lanes.Num(), Network.Zones.Num(), Signalized, Conflicts, DeadEnds);
+		if (DeadEnds > 0)
+		{
+			UE_LOG(LogRammsCrowd, Warning, TEXT("Traffic: %d vehicle lanes lead nowhere (a road and an intersection that do not meet); cars reaching one start again elsewhere. 'log LogRammsCrowd Verbose' lists them."), DeadEnds);
+		}
 	}
 }
