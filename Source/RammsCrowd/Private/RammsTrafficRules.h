@@ -25,7 +25,8 @@ namespace RammsTraffic
 	constexpr float StuckWalkerReleaseSeconds = 2.0f;
 	/** Walker radius when a crowd member has no FAgentRadiusFragment (URammsCrowdAgentTrait's default), cm. */
 	constexpr float DefaultWalkerRadius = 25.0f;
-	/** A car standing at a dead end starts again elsewhere once no player is this near (or after MaxWaitSeconds), cm. */
+	/** A car reaching a dead end starts again elsewhere at once when no player is this near (else after standing there
+	 *  MaxWaitSeconds), and never closer than this to a player, cm. */
 	constexpr double DeadEndRespawnDistance = 4000.0;
 
 	/** One vehicle of this frame: pointers into its chunk (no entity is created or destroyed during the frame). */

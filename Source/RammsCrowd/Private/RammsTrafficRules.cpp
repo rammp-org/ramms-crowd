@@ -1008,11 +1008,16 @@ namespace RammsTraffic
 		}
 		AdvanceLanes(V, Self);
 
-		// Standing at a dead end: start again elsewhere once nobody is near enough to see it go (or after MaxWaitSeconds).
-		if (bDeadEnd && V.Lane == LaneIndex && !N.IsValidLane(V.NextLane) && V.Speed < 10.0f
+		// At a dead end (its front within 1.5 m of where it stops): start again elsewhere at once when nobody is near
+		// enough to see it go; watched, once it has stood there MaxWaitSeconds. (IDM creeps the last metre into a stop
+		// for several seconds, so "there" is close and slow, not standing.)
+		if (bDeadEnd && V.Lane == LaneIndex && !N.IsValidLane(V.NextLane)
 			&& N.Lanes[V.Lane].Length - (V.Distance + V.HalfLength) < P.StopLineGap + 150.0f)
 		{
-			V.DeadEndWait += Dt;
+			if (V.Speed < 50.0f)
+			{
+				V.DeadEndWait += Dt;
+			}
 			if (NearestPlayerDistanceSquared(Transform.GetLocation()) > FMath::Square(DeadEndRespawnDistance) || V.DeadEndWait > P.MaxWaitSeconds)
 			{
 				Respawn(V, Self);

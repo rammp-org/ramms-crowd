@@ -78,8 +78,8 @@ cars' rules for `MaxWaitSeconds` in all (time at a red light, in a queue or at t
 count) stops waiting for cars that are only let in: it still waits for any in the intersection, any
 let in that can no longer stop, any oncoming car it would turn across that can no longer stop, and
 room on its exit. Two intersections joined directly (no road lane between) are decided at their
-boundary. A lane that leads nowhere ends in a stop; a car standing there starts again elsewhere
-once no player is within 40 m (or after `MaxWaitSeconds`). A car that has just turned off a shared
+boundary. A lane that leads nowhere ends in a stop; a car reaching it starts again elsewhere at
+once when no player is within 40 m, else after standing there `MaxWaitSeconds`. A car that has just turned off a shared
 entry stays the leader of the one behind it until their lanes have separated. Cars stop for
 pedestrians and the robot in their way -- physically in their path, or on the carriageway within
 `CorridorMargin` of it -- so turning cars yield at the crossings and nobody drives into the robot,
