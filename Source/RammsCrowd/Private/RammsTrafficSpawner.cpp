@@ -8,6 +8,7 @@
 #include "GameFramework/Pawn.h"
 #include "GameFramework/PlayerController.h"
 #include "GameFramework/PlayerStart.h"
+#include "MassCommandBuffer.h"
 #include "MassCommonFragments.h"
 #include "MassEntityManager.h"
 #include "MassEntityTemplate.h"
@@ -24,6 +25,9 @@ ARammsTrafficSpawner::ARammsTrafficSpawner()
 {
 	PrimaryActorTick.bCanEverTick = true;
 	PrimaryActorTick.bStartWithTickEnabled = false;
+	// Spawning and destroying entities is synchronous Mass work: tick where no Mass processing phase runs (Mass runs
+	// its phases in parallel with the actor ticks of their tick groups).
+	PrimaryActorTick.TickGroup = TG_PostUpdateWork;
 	RootComponent = CreateDefaultSubobject<USceneComponent>(TEXT("Root"));
 	VehicleActorClass = ARammsTrafficVehicleActor::StaticClass();
 }
@@ -54,6 +58,10 @@ void ARammsTrafficSpawner::Tick(const float DeltaSeconds)
 		SetActorTickEnabled(false);
 		return;
 	}
+	if (bWaitingForMass)
+	{
+		return; // Mass was mid-frame: again next tick
+	}
 	if (WaitedSeconds > 10.0f && !bWarnedNoLanes)
 	{
 		UE_LOG(LogRammsCrowd, Warning, TEXT("[%s] Traffic: still no ZoneGraph lanes tagged '%s' after %.0f s (build the traffic lanes, then the ZoneGraph); waiting."),
@@ -81,7 +89,7 @@ void ARammsTrafficSpawner::DespawnTraffic()
 		UWorld* World = GetWorld();
 		UMassSpawnerSubsystem* MassSpawner = World != nullptr ? UWorld::GetSubsystem<UMassSpawnerSubsystem>(World) : nullptr;
 		FMassEntityManager* EntityManager = World != nullptr ? UE::Mass::Utils::GetEntityManager(World) : nullptr;
-		if (MassSpawner != nullptr && EntityManager != nullptr && !EntityManager->IsProcessing())
+		if (EntityManager != nullptr)
 		{
 			TArray<FMassEntityHandle> Valid;
 			for (const FMassEntityHandle& Entity : Entities)
@@ -93,7 +101,18 @@ void ARammsTrafficSpawner::DespawnTraffic()
 			}
 			if (Valid.Num() > 0)
 			{
-				MassSpawner->DestroyEntities(Valid);
+				if (EntityManager->IsProcessing() || MassSpawner == nullptr)
+				{
+					// Mid-frame (called from another actor's tick while Mass runs in parallel): destroy them when the
+					// frame's commands are flushed, never leave them driving without a body.
+					TSharedPtr<FMassCommandBuffer> Commands = MakeShared<FMassCommandBuffer>();
+					Commands->DestroyEntities(Valid);
+					EntityManager->AppendCommands(Commands);
+				}
+				else
+				{
+					MassSpawner->DestroyEntities(Valid);
+				}
 			}
 		}
 		Entities.Reset();
@@ -106,11 +125,27 @@ bool ARammsTrafficSpawner::SpawnTraffic()
 	URammsTrafficSubsystem* Traffic = World != nullptr ? UWorld::GetSubsystem<URammsTrafficSubsystem>(World) : nullptr;
 	UMassSpawnerSubsystem* MassSpawner = World != nullptr ? UWorld::GetSubsystem<UMassSpawnerSubsystem>(World) : nullptr;
 	const UZoneGraphSubsystem* ZoneGraph = World != nullptr ? UWorld::GetSubsystem<UZoneGraphSubsystem>(World) : nullptr;
-	if (Traffic == nullptr || MassSpawner == nullptr || ZoneGraph == nullptr || UE::Mass::Utils::GetEntityManager(World) == nullptr)
+	const FMassEntityManager* Manager = World != nullptr ? UE::Mass::Utils::GetEntityManager(World) : nullptr;
+	bWaitingForMass = false;
+	if (Traffic == nullptr || MassSpawner == nullptr || ZoneGraph == nullptr || Manager == nullptr)
 	{
 		return false;
 	}
+	if (Manager->IsProcessing())
+	{
+		// Called while Mass runs (a Blueprint in another actor's tick): spawning now is not allowed; next tick.
+		bWaitingForMass = true;
+		SetActorTickEnabled(true);
+		return false;
+	}
 	Traffic->SetTagNames(VehicleTagName, IntersectionTagName, SignalizedTagName);
+	// The widest car decides which intersection lanes are too close to be used at once.
+	float WidestCar = 0.0f;
+	for (const FRammsTrafficCarMesh& Car : CarMeshes)
+	{
+		WidestCar = FMath::Max(WidestCar, Car.Mesh != nullptr ? static_cast<float>(FMath::Max(Car.Footprint.Y, 150.0)) : 0.0f);
+	}
+	Traffic->SetMaxVehicleWidth(WidestCar > 0.0f ? WidestCar : 190.0f);
 	const FRammsTrafficNetwork* Net = Traffic->GetNetwork();
 	if (Net == nullptr)
 	{
@@ -118,12 +153,14 @@ bool ARammsTrafficSpawner::SpawnTraffic()
 	}
 	DespawnTraffic();
 
-	// The vehicles' template: this spawner's driving parameters on a vehicle trait (rebuilt, so a respawn picks up changes).
+	// The vehicles' template: this spawner's driving parameters on a vehicle trait (rebuilt, so a respawn picks up
+	// changes), inside their editor ranges whatever set them.
+	const FRammsTrafficDrivingParams Params = Driving.Sanitized();
 	if (RuntimeTrait == nullptr)
 	{
 		RuntimeTrait = NewObject<URammsTrafficVehicleTrait>(this, TEXT("RuntimeVehicleTrait"), RF_Transient);
 	}
-	RuntimeTrait->Driving = Driving;
+	RuntimeTrait->Driving = Params;
 	RuntimeConfig.DestroyEntityTemplate(*World);
 	RuntimeConfig = FMassEntityConfig(*this);
 	RuntimeConfig.AddTrait(*RuntimeTrait);
@@ -243,7 +280,7 @@ bool ARammsTrafficSpawner::SpawnTraffic()
 		V.Distance = Place.Distance;
 		V.HalfLength = static_cast<float>(FMath::Max(Car.Footprint.X, 300.0) * 0.5);
 		V.HalfWidth = static_cast<float>(FMath::Max(Car.Footprint.Y, 150.0) * 0.5);
-		V.DesiredSpeed = Driving.SpeedLimit * (1.0f + Driving.SpeedVariation * Rng.FRandRange(-1.0f, 1.0f));
+		V.DesiredSpeed = Params.SpeedLimit * (1.0f + Params.SpeedVariation * Rng.FRandRange(-1.0f, 1.0f));
 		V.Speed = V.DesiredSpeed * Rng.FRandRange(0.3f, 0.8f);
 		V.RandomState = HashCombine(GetTypeHash(Seed), GetTypeHash(i)) | 1u;
 		V.Visual = Visual;
@@ -274,6 +311,6 @@ bool ARammsTrafficSpawner::SpawnTraffic()
 	Creation.Reset();
 
 	UE_LOG(LogRammsCrowd, Display, TEXT("[%s] Traffic: %d vehicles (%d wanted) on %.2f km of road lanes, %d car meshes, speed limit %.0f km/h, seed %d."),
-		*GetName(), Entities.Num(), Wanted, LaneCm / 100000.0, CarMeshes.Num(), Driving.SpeedLimit * 0.036f, Seed);
+		*GetName(), Entities.Num(), Wanted, LaneCm / 100000.0, CarMeshes.Num(), Params.SpeedLimit * 0.036f, Seed);
 	return true;
 }

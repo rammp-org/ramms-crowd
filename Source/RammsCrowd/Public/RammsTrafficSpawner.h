@@ -80,10 +80,12 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Ramms|Traffic")
 	bool bSpawnOnBeginPlay = true;
 
-	/** Spawn now (replacing any traffic it spawned before). False when there are no vehicle lanes yet. */
+	/** Spawn now (replacing any traffic it spawned before). False when there are no vehicle lanes yet, or when Mass is
+	 *  processing (called from a tick that runs alongside it): it then spawns on its own next tick. */
 	UFUNCTION(BlueprintCallable, Category = "Ramms|Traffic")
 	bool SpawnTraffic();
 
+	/** Removes the traffic it spawned (while Mass is processing, the entities go when the frame's commands are flushed). */
 	UFUNCTION(BlueprintCallable, Category = "Ramms|Traffic")
 	void DespawnTraffic();
 
@@ -109,4 +111,6 @@ private:
 	TArray<FMassEntityHandle> Entities;
 	float WaitedSeconds = 0.0f;
 	bool bWarnedNoLanes = false;
+	/** The last SpawnTraffic found Mass processing: the next tick tries again. */
+	bool bWaitingForMass = false;
 };

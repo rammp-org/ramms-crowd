@@ -16,6 +16,8 @@ void URammsTrafficVehicleTrait::BuildTemplate(FMassEntityTemplateBuildContext& B
 	BuildContext.AddFragment<FRammsTrafficVisualFragment>();
 	BuildContext.AddTag<FRammsTrafficVehicleTag>();
 
-	const FConstSharedStruct DrivingFragment = EntityManager.GetOrCreateConstSharedFragment(Driving);
+	// Inside the editor's ranges whatever set the values (Python, Blueprint): the rules divide by some of them.
+	const FRammsTrafficDrivingParams Params = Driving.Sanitized();
+	const FConstSharedStruct DrivingFragment = EntityManager.GetOrCreateConstSharedFragment(Params);
 	BuildContext.AddConstSharedFragment(DrivingFragment);
 }
