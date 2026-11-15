@@ -20,7 +20,10 @@ class UMaterialParameterCollection;
  * closed otherwise, and the RAMMS crossing gate holds pedestrians at the start of a closed crossing.
  *
  * Placed by the level builder (RammsWorldGen traffic.py), which also sets SignalParameters. Without a clock,
- * signalized intersections run as all-way stops and the crossings stay as MassCrowd leaves them (closed).
+ * signalized intersections run as all-way stops, and the crossings stay as MassCrowd leaves them: its lane state
+ * Opened (it only marks them closed with a ZoneGraph annotation tag), so the gate holds nobody for a signal. A timing
+ * whose pedestrian clearance takes up a whole green (no Walk for that axis) is warned about at BeginPlay and in the
+ * editor: those crossings would never open.
  */
 UCLASS(BlueprintType)
 class RAMMSCROWD_API ARammsTrafficSignalClock : public AActor
@@ -58,9 +61,16 @@ public:
 
 	virtual void Tick(float DeltaSeconds) override;
 
+#if WITH_EDITOR
+	virtual void PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent) override;
+#endif
+
 protected:
 	virtual void BeginPlay() override;
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
+
+	/** Warns when an axis never shows Walk (PedestrianClearanceSeconds takes up its whole green). */
+	void WarnIfNoWalk() const;
 
 private:
 	struct FCrossing

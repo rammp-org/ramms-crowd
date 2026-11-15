@@ -35,7 +35,28 @@ void ARammsTrafficSignalClock::BeginPlay()
 	{
 		UE_LOG(LogRammsCrowd, Warning, TEXT("[%s] Traffic signal clock: no SignalParameters collection; the signal heads keep their resting look."), *GetName());
 	}
+	WarnIfNoWalk();
 }
+
+void ARammsTrafficSignalClock::WarnIfNoWalk() const
+{
+	for (int32 Axis = 0; Axis < 2; ++Axis)
+	{
+		if (Timing.GetWalkSeconds(Axis) <= UE_KINDA_SMALL_NUMBER)
+		{
+			UE_LOG(LogRammsCrowd, Warning, TEXT("[%s] Traffic signal clock: pedestrians walking along %s never get Walk (PedestrianClearanceSeconds %.1f s >= the parallel green %.1f s); their crossings stay closed and walkers wait at the kerb for good."),
+				*GetName(), Axis == 0 ? TEXT("X") : TEXT("Y"), Timing.PedestrianClearanceSeconds, Axis == 0 ? Timing.GreenSecondsX : Timing.GreenSecondsY);
+		}
+	}
+}
+
+#if WITH_EDITOR
+void ARammsTrafficSignalClock::PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent)
+{
+	Super::PostEditChangeProperty(PropertyChangedEvent);
+	WarnIfNoWalk();
+}
+#endif
 
 void ARammsTrafficSignalClock::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
