@@ -17,6 +17,7 @@
 #include "MassMovementFragments.h"
 #include "MassNavigationFragments.h"
 #include "RammsCrowdAgentTrait.h"
+#include "RammsCrowdLog.h"
 #include "RammsPlayerAvatarTrait.h"
 #include "RammsTrafficSubsystem.h"
 #include "RammsTrafficTypes.h"
@@ -29,22 +30,40 @@ namespace
 	TAutoConsoleVariable<int32> CVarTrafficDebug(
 		TEXT("ramms.Traffic.Debug"),
 		0,
-		TEXT("Draw the Mass traffic: 1 = each vehicle's speed (km/h) and what it yields to, 2 = also its corridor ahead."),
+		TEXT("Draw the Mass traffic: 1 = each vehicle's speed (km/h) and what limits it, 2 = also its corridor ahead."),
 		ECVF_Default);
+
+	TAutoConsoleVariable<float> CVarTrafficDumpInterval(
+		TEXT("ramms.Traffic.DumpInterval"),
+		0.0f,
+		TEXT("Run ramms.Traffic.Dump every this many seconds of game time (0 = only when asked)."),
+		ECVF_Default);
+
+	/** One vehicle of this frame: pointers into its chunk (no entity is created or destroyed during the frame). */
+	struct FVehicleRef
+	{
+		FRammsTrafficVehicleFragment* V = nullptr;
+		FTransform* Transform = nullptr;
+		const FRammsTrafficVisualFragment* Visual = nullptr;
+		const FRammsTrafficDrivingParams* P = nullptr;
+	};
 
 	struct FOccupant
 	{
 		float Distance = 0.0f;
 		float Speed = 0.0f;
 		float HalfLength = 0.0f;
+		float HalfWidth = 0.0f;
 		int32 Vehicle = INDEX_NONE;
 	};
 
-	/** A vehicle in an intersection, or let into it, on Lane. */
+	/** A vehicle in an intersection (bInside), or let into it, on Lane. */
 	struct FClaim
 	{
 		int32 Lane = INDEX_NONE;
 		int32 Vehicle = INDEX_NONE;
+		float HalfLength = 0.0f;
+		bool bInside = false;
 	};
 
 	/** A vehicle standing at an all-way stop, for NextLane, since Arrival. */
@@ -127,6 +146,7 @@ namespace
 		bool bHasSignals = false;
 		FRammsSignalState Signals;
 
+		TArray<FVehicleRef> Vehicles;
 		TArray<TArray<FOccupant>> Occupancy;
 		TArray<TArray<FClaim>> Claims;
 		TArray<TArray<FWaiter>> Waiting;
@@ -137,6 +157,7 @@ namespace
 		float MaxPedestrianRadius = 0.0f;
 		TArray<FObstacleCapsule> Footprints;
 		TArray<FVector> Players;
+		TSet<FZoneGraphLaneHandle> HeldCrossings;
 
 		bool Sample(const int32 Lane, const float Distance, FZoneGraphLaneLocation& Out) const
 		{
@@ -174,7 +195,23 @@ namespace
 			}
 			return Best;
 		}
+
+		/** The road lane a vehicle is on approaches an intersection: that zone, else INDEX_NONE. */
+		int32 ApproachZone(const FRammsTrafficVehicleFragment& V) const
+		{
+			if (!Net->IsValidLane(V.Lane) || Net->Lanes[V.Lane].Zone != INDEX_NONE || !Net->IsValidLane(V.NextLane))
+			{
+				return INDEX_NONE;
+			}
+			return Net->Lanes[V.NextLane].Zone;
+		}
 	};
+
+	/** Front bumper to the stopping point at the end of the vehicle's (approach) lane. */
+	float DistanceToLine(const FTrafficFrame& F, const FRammsTrafficVehicleFragment& V, const FRammsTrafficDrivingParams& P)
+	{
+		return F.Net->Lanes[V.Lane].Length - (V.Distance + V.HalfLength) - P.StopLineGap;
+	}
 
 	float TurnSpeed(const FRammsTrafficLane& Lane, const FRammsTrafficDrivingParams& Params)
 	{
@@ -214,24 +251,77 @@ namespace
 		return Next.Last();
 	}
 
-	/** The nearest vehicle ahead on the vehicle's lane, else on its next two lanes. */
-	bool FindLeader(const FTrafficFrame& F, const FRammsTrafficVehicleFragment& V, const int32 Self, float& OutGap, float& OutSpeed)
+	/**
+	 * Cars on lanes diverging from intersection lane OnLane (same entry) that are still beside it: a car that turned
+	 * off ahead of this one keeps being its leader until the lanes have separated by their two half widths.
+	 * OffsetToStart: from this vehicle's front to OnLane's start (negative once it is on it).
+	 */
+	void SiblingLeaders(const FTrafficFrame& F, const FRammsTrafficVehicleFragment& V, const int32 Self, const int32 OnLane, const float OffsetToStart,
+		float& InOutGap, float& InOutSpeed, int32& InOutLeader)
+	{
+		const FRammsTrafficNetwork& Net = *F.Net;
+		for (const int32 Sibling : Net.Lanes[OnLane].Siblings)
+		{
+			for (const FOccupant& O : F.Occupancy[Sibling])
+			{
+				if (O.Distance > 2500.0f)
+				{
+					break; // sorted: the rest have turned well away
+				}
+				if (O.Vehicle == Self)
+				{
+					continue;
+				}
+				// Both lanes start at the entry, so distances along them compare: only a car whose centre is ahead of
+				// this one's leads it (two cars side by side never both brake for each other).
+				const float MyCentre = -OffsetToStart - V.HalfLength;
+				const float Rear = FMath::Max(O.Distance - O.HalfLength, 0.0f);
+				const float Gap = OffsetToStart + Rear;
+				if (O.Distance <= MyCentre || Gap >= InOutGap)
+				{
+					continue; // beside or behind this one, or farther than the leader already found
+				}
+				FZoneGraphLaneLocation Mine, Theirs;
+				if (!F.Sample(OnLane, Rear, Mine) || !F.Sample(Sibling, Rear, Theirs))
+				{
+					continue;
+				}
+				if (FVector::Dist2D(Mine.Position, Theirs.Position) < V.HalfWidth + O.HalfWidth + 40.0f)
+				{
+					InOutGap = Gap;
+					InOutSpeed = O.Speed;
+					InOutLeader = O.Vehicle;
+				}
+			}
+		}
+	}
+
+	/** The nearest vehicle ahead: on the vehicle's lane, else its next two lanes, or one diverging from them it is still beside. */
+	bool FindLeader(const FTrafficFrame& F, const FRammsTrafficVehicleFragment& V, const int32 Self, float& OutGap, float& OutSpeed, int32& OutLeader)
 	{
 		const FRammsTrafficNetwork& Net = *F.Net;
 		const float Front = V.Distance + V.HalfLength;
+		float Gap = TNumericLimits<float>::Max();
+		float Speed = 0.0f;
+		int32 Leader = INDEX_NONE;
 		for (const FOccupant& O : F.Occupancy[V.Lane])
 		{
 			if (O.Vehicle == Self || O.Distance <= V.Distance)
 			{
 				continue;
 			}
-			OutGap = O.Distance - O.HalfLength - Front;
-			OutSpeed = O.Speed;
-			return true;
+			Gap = O.Distance - O.HalfLength - Front;
+			Speed = O.Speed;
+			Leader = O.Vehicle;
+			break;
+		}
+		if (Net.Lanes[V.Lane].Zone != INDEX_NONE)
+		{
+			SiblingLeaders(F, V, Self, V.Lane, -Front, Gap, Speed, Leader);
 		}
 		float Offset = Net.Lanes[V.Lane].Length - Front;
 		int32 Lane = V.NextLane;
-		for (int32 Hop = 0; Hop < 2 && Net.IsValidLane(Lane) && Offset < 15000.0f; ++Hop)
+		for (int32 Hop = 0; Hop < 2 && Net.IsValidLane(Lane) && Offset < FMath::Min(Gap, 15000.0f); ++Hop)
 		{
 			for (const FOccupant& O : F.Occupancy[Lane])
 			{
@@ -239,43 +329,89 @@ namespace
 				{
 					continue;
 				}
-				OutGap = Offset + O.Distance - O.HalfLength;
-				OutSpeed = O.Speed;
-				return true;
+				if (Offset + O.Distance - O.HalfLength < Gap)
+				{
+					Gap = Offset + O.Distance - O.HalfLength;
+					Speed = O.Speed;
+					Leader = O.Vehicle;
+				}
+				break;
+			}
+			if (Net.Lanes[Lane].Zone != INDEX_NONE)
+			{
+				SiblingLeaders(F, V, Self, Lane, Offset, Gap, Speed, Leader);
 			}
 			Offset += Net.Lanes[Lane].Length;
 			Lane = Net.UniqueNext(Lane);
 		}
-		return false;
+		if (Leader == INDEX_NONE)
+		{
+			return false;
+		}
+		OutGap = Gap;
+		OutSpeed = Speed;
+		OutLeader = Leader;
+		return true;
+	}
+
+	bool IsLeft(const FRammsTrafficNetwork& Net, const int32 Lane)
+	{
+		return Net.IsValidLane(Lane) && Net.Lanes[Lane].Turn == ERammsTrafficTurn::Left;
 	}
 
 	/**
-	 * Whether the vehicle may enter the intersection ahead (V.NextLane's zone). ToLine: front bumper to its
-	 * stopping point. Returns why not, or None (and the vehicle holds a claim on its lane).
+	 * Whether vehicle Self may enter the intersection ahead (its NextLane's zone). Returns why not, or None (and it
+	 * holds a claim on its lane). Called for every approaching vehicle each frame, protected movements before left
+	 * turns, so a left turn sees which oncoming vehicles have just been let in.
 	 */
-	ERammsTrafficYield EvaluateEntry(FTrafficFrame& F, FRammsTrafficVehicleFragment& V, const FRammsTrafficDrivingParams& P, const int32 Self, const float ToLine)
+	ERammsTrafficYield DecideEntry(FTrafficFrame& F, const int32 Self, int32& OutBlocker)
 	{
 		const FRammsTrafficNetwork& Net = *F.Net;
+		FRammsTrafficVehicleFragment& V = *F.Vehicles[Self].V;
+		const FRammsTrafficDrivingParams& P = *F.Vehicles[Self].P;
 		const FRammsTrafficLane& Into = Net.Lanes[V.NextLane];
 		const int32 Zone = Into.Zone;
+		const float ToLine = DistanceToLine(F, V, P);
 		const bool bSignalized = Into.bSignalized && F.bHasSignals;
-		// Held by other vehicles for too long (a gridlock the rules did not foresee): go anyway.
-		const bool bDeadlock = V.WaitTime > P.MaxWaitSeconds;
+		OutBlocker = INDEX_NONE;
 
-		if (bSignalized)
+		if (ToLine < -1.0f && V.bGranted)
 		{
-			if (RammsTraffic::MustStopForSignal(F.Signals.GetLight(Into.Axis), V.Speed, ToLine, P.AmberStopDeceleration, P.MaxDeceleration))
+			return ERammsTrafficYield::None; // already over the line: it goes on in
+		}
+		// All-way stop: the time it has stood at the line, and when it got there.
+		if (!bSignalized && !V.bGranted && V.Speed < 30.0f && ToLine < 150.0f)
+		{
+			V.StoppedAtLine += F.Dt;
+			if (V.ArrivalTime < 0.0f)
 			{
-				V.bGranted = false;
-				return ERammsTrafficYield::Signal;
+				V.ArrivalTime = static_cast<float>(F.Now);
 			}
 		}
-		else if (V.bGranted)
+
+		// Far from the line only the signal matters (braking for red starts early); no claims are taken yet.
+		const float DecideDistance = FMath::Max(1500.0f, V.Speed * V.Speed / (2.0f * P.ComfortDeceleration) + 600.0f);
+		const ERammsSignalLight Light = bSignalized ? F.Signals.GetLight(Into.Axis) : ERammsSignalLight::Green;
+		// A permitted left turn that waited at the line for oncoming traffic goes on the amber (and the all red that
+		// follows it): oncoming traffic stops for the amber.
+		const int32 OtherAxis = 1 - Into.Axis;
+		const bool bAllRedAfterOurs = bSignalized && F.Signals.LightX == ERammsSignalLight::Red && F.Signals.LightY == ERammsSignalLight::Red
+			&& (OtherAxis == 0 ? F.Signals.SecondsToChangeX : F.Signals.SecondsToChangeY) < (Into.Axis == 0 ? F.Signals.SecondsToChangeX : F.Signals.SecondsToChangeY);
+		const bool bSneak = bSignalized && Into.Turn == ERammsTrafficTurn::Left && V.bLeftWaiting && ToLine < 300.0f
+			&& (Light == ERammsSignalLight::Amber || bAllRedAfterOurs);
+		if (bSignalized && !bSneak && RammsTraffic::MustStopForSignal(Light, V.Speed, FMath::Max(ToLine, 0.0f), P.AmberStopDeceleration, P.MaxDeceleration))
 		{
-			// All-way stop: its turn came; it goes.
-			return ERammsTrafficYield::None;
+			V.bGranted = false;
+			return ERammsTrafficYield::Signal;
 		}
-		else
+		if (ToLine > DecideDistance)
+		{
+			V.bGranted = false;
+			return bSignalized ? ERammsTrafficYield::None : ERammsTrafficYield::StopSign;
+		}
+
+		const bool bDeadlock = V.BlockedTime > P.MaxWaitSeconds;
+		if (!bSignalized && !V.bGranted)
 		{
 			if (V.StoppedAtLine < P.AllWayStopSeconds)
 			{
@@ -286,60 +422,91 @@ namespace
 				for (const FWaiter& W : F.Waiting[Zone])
 				{
 					const bool bEarlier = W.Arrival < V.ArrivalTime || (W.Arrival == V.ArrivalTime && W.Vehicle < Self);
-					if (W.Vehicle != Self && bEarlier && Net.Conflict(W.NextLane, V.NextLane))
+					if (W.Vehicle != Self && bEarlier && Net.Conflict(W.NextLane, V.NextLane) && !F.Vehicles[W.Vehicle].V->bGranted)
 					{
+						OutBlocker = W.Vehicle;
 						return ERammsTrafficYield::StopSign;
 					}
 				}
 			}
 		}
 
-		if (!bDeadlock)
+		// Conflicting vehicles in the intersection always count; ones only let in count unless this one is deadlocked.
+		for (const FClaim& C : F.Claims[Zone])
 		{
-			for (const FClaim& C : F.Claims[Zone])
+			if (C.Vehicle != Self && Net.Conflict(C.Lane, V.NextLane) && (C.bInside || !bDeadlock))
 			{
-				if (C.Vehicle != Self && Net.Conflict(C.Lane, V.NextLane))
-				{
-					V.bGranted = false;
-					return ERammsTrafficYield::Intersection;
-				}
+				V.bGranted = false;
+				OutBlocker = C.Vehicle;
+				return ERammsTrafficYield::Claim;
 			}
-			// Do not block the box: enter only when the exit has room for it beyond a queue that is standing there.
+		}
+
+		if (!V.bGranted && !bDeadlock)
+		{
+			// Do not block the box: room on the exit beyond a slow queue there, less what is already let in to it.
 			const int32 Exit = Net.UniqueNext(V.NextLane);
-			if (!V.bGranted && Net.IsValidLane(Exit))
+			if (Net.IsValidLane(Exit))
 			{
+				float Room = TNumericLimits<float>::Max();
+				int32 Last = INDEX_NONE;
 				for (const FOccupant& O : F.Occupancy[Exit])
 				{
-					if (O.Vehicle == Self)
+					if (O.Vehicle != Self)
 					{
-						continue;
+						if (O.Speed < 300.0f)
+						{
+							Room = O.Distance - O.HalfLength;
+							Last = O.Vehicle;
+						}
+						break; // the car nearest the exit's start is listed first
 					}
-					if (O.Distance - O.HalfLength < 2.0f * V.HalfLength + P.MinGap && O.Speed < 150.0f)
+				}
+				if (Room < TNumericLimits<float>::Max())
+				{
+					for (const FClaim& C : F.Claims[Zone])
 					{
-						return ERammsTrafficYield::Leader;
+						if (C.Vehicle != Self && Net.UniqueNext(C.Lane) == Exit)
+						{
+							Room -= 2.0f * C.HalfLength + P.MinGap;
+						}
 					}
-					break; // the last car on the exit is the first one listed
+					if (Room < 2.0f * V.HalfLength + P.MinGap)
+					{
+						OutBlocker = Last;
+						return ERammsTrafficYield::Box;
+					}
 				}
 			}
-			if (bSignalized && Into.Turn == ERammsTrafficTurn::Left)
+		}
+
+		if (bSignalized && Into.Turn == ERammsTrafficTurn::Left && !bDeadlock && !V.bGranted)
+		{
+			// Permitted left: oncoming straight and right-turning traffic goes first -- the ones just let in, and the
+			// ones on their way within the gap. Not one standing at its line held by something else, not another left
+			// turn (two opposing lefts sort themselves out through their claims), and on the amber only those
+			// committed to going through. Once let in, the left turn keeps its claim: oncoming traffic waits for it.
+			for (const FApproach& A : F.Approaching[Zone])
 			{
-				// Permitted left: oncoming straight and right-turning traffic first.
-				for (const FApproach& A : F.Approaching[Zone])
+				if (A.Vehicle == Self || IsLeft(Net, A.NextLane) || !Net.Conflict(A.NextLane, V.NextLane))
 				{
-					if (A.Vehicle == Self || !Net.Conflict(A.NextLane, V.NextLane) || Net.Lanes[A.NextLane].Turn == ERammsTrafficTurn::Left)
+					continue;
+				}
+				if (F.Signals.GetLight(Net.Lanes[A.NextLane].Axis) == ERammsSignalLight::Red)
+				{
+					continue;
+				}
+				const bool bLetIn = F.Vehicles[A.Vehicle].V->bGranted;
+				const bool bComing = A.Speed > 100.0f && A.DistanceToLine / A.Speed < P.LeftTurnGapSeconds;
+				if (bLetIn || (!bSneak && bComing))
+				{
+					V.bGranted = false;
+					if (Light == ERammsSignalLight::Green && ToLine < 300.0f)
 					{
-						continue;
+						V.bLeftWaiting = true;
 					}
-					if (F.Signals.GetLight(Net.Lanes[A.NextLane].Axis) == ERammsSignalLight::Red)
-					{
-						continue;
-					}
-					const float Seconds = A.DistanceToLine / FMath::Max(A.Speed, 50.0f);
-					if (A.DistanceToLine < 300.0f || Seconds < P.LeftTurnGapSeconds)
-					{
-						V.bGranted = false;
-						return ERammsTrafficYield::Intersection;
-					}
+					OutBlocker = A.Vehicle;
+					return ERammsTrafficYield::OncomingLeft;
 				}
 			}
 		}
@@ -347,7 +514,7 @@ namespace
 		if (!V.bGranted)
 		{
 			V.bGranted = true;
-			F.Claims[Zone].Add(FClaim{ V.NextLane, Self });
+			F.Claims[Zone].Add(FClaim{ V.NextLane, Self, V.HalfLength, false });
 		}
 		return ERammsTrafficYield::None;
 	}
@@ -441,7 +608,7 @@ namespace
 			FrontPosition.Z = TraceGround(F.World, FrontPosition);
 			RearPosition.Z = TraceGround(F.World, RearPosition);
 		}
-		FVector Chord = FrontPosition - RearPosition;
+		const FVector Chord = FrontPosition - RearPosition;
 		const double Horizontal = FVector2D(Chord).Size();
 		const FVector Flat = Horizontal > 1.0 ? FVector(Chord.X, Chord.Y, 0.0) / Horizontal : FVector(Center.Direction.X, Center.Direction.Y, 0.0).GetSafeNormal();
 		const double Yaw = FMath::RadiansToDegrees(FMath::Atan2(Flat.Y, Flat.X));
@@ -480,18 +647,20 @@ namespace
 				continue;
 			}
 			V.Lane = Lane;
-			V.NextLane = INDEX_NONE;
+			V.NextLane = ChooseNext(Net, Lane, V.RandomState);
+			V.PrevLane = INDEX_NONE;
 			V.Distance = Distance;
 			V.Speed = V.DesiredSpeed * 0.5f;
 			V.bGranted = false;
+			V.bLeftWaiting = false;
 			V.ArrivalTime = -1.0f;
 			V.StoppedAtLine = 0.0f;
-			V.WaitTime = 0.0f;
+			V.BlockedTime = 0.0f;
 			V.bTeleport = true;
 			V.NetworkVersion = Net.Version;
 			TArray<FOccupant>& Occupants = F.Occupancy[Lane];
 			const int32 At = Algo::LowerBoundBy(Occupants, Distance, &FOccupant::Distance);
-			Occupants.Insert(FOccupant{ Distance, V.Speed, V.HalfLength, Self }, At);
+			Occupants.Insert(FOccupant{ Distance, V.Speed, V.HalfLength, V.HalfWidth, Self }, At);
 			return true;
 		}
 		return false;
@@ -512,26 +681,40 @@ namespace
 				}
 				return;
 			}
-			const int32 FromZone = Net.Lanes[V.Lane].Zone;
-			V.Distance -= Net.Lanes[V.Lane].Length;
+			const int32 FromLane = V.Lane;
+			const int32 FromZone = Net.Lanes[FromLane].Zone;
+			V.Distance -= Net.Lanes[FromLane].Length;
 			V.Lane = V.NextLane;
 			V.NextLane = ChooseNext(Net, V.Lane, V.RandomState);
 			const int32 ToZone = Net.Lanes[V.Lane].Zone;
 			if (ToZone == INDEX_NONE)
 			{
 				V.bGranted = false;
+				V.PrevLane = FromZone != INDEX_NONE ? FromLane : INDEX_NONE;
 			}
 			else if (FromZone == INDEX_NONE)
 			{
+				// Into the intersection: its stop is over.
 				V.StoppedAtLine = 0.0f;
 				V.ArrivalTime = -1.0f;
+				V.BlockedTime = 0.0f;
+				V.bLeftWaiting = false;
+				V.PrevLane = INDEX_NONE;
 			}
+		}
+		if (V.PrevLane != INDEX_NONE && V.Distance - V.HalfLength > 0.0f)
+		{
+			V.PrevLane = INDEX_NONE; // its rear is out of the intersection too
 		}
 	}
 
-	void UpdateVehicle(FTrafficFrame& F, FRammsTrafficVehicleFragment& V, const FRammsTrafficVisualFragment& Visual, const FRammsTrafficDrivingParams& P, const int32 Self, FTransform& Transform)
+	void UpdateVehicle(FTrafficFrame& F, const int32 Self)
 	{
 		const FRammsTrafficNetwork& Net = *F.Net;
+		FRammsTrafficVehicleFragment& V = *F.Vehicles[Self].V;
+		const FRammsTrafficDrivingParams& P = *F.Vehicles[Self].P;
+		const FRammsTrafficVisualFragment& Visual = *F.Vehicles[Self].Visual;
+		FTransform& Transform = *F.Vehicles[Self].Transform;
 		if (V.NetworkVersion != Net.Version || !Net.IsValidLane(V.Lane))
 		{
 			// Placed on another network (the ZoneGraph changed): find a new place.
@@ -568,13 +751,17 @@ namespace
 
 		double Accel = RammsTraffic::IdmFree(V.Speed, Idm);
 		ERammsTrafficYield Reason = ERammsTrafficYield::None;
+		int32 Blocker = INDEX_NONE;
+		float LimitGap = 0.0f;
 		double HardStop = -1.0;
-		auto Constrain = [&Accel, &Reason, &HardStop](const double A, const ERammsTrafficYield Why, const double StopAt)
+		auto Constrain = [&Accel, &Reason, &Blocker, &LimitGap, &HardStop](const double A, const ERammsTrafficYield Why, const double StopAt, const int32 Who, const float Gap)
 		{
 			if (A < Accel)
 			{
 				Accel = A;
 				Reason = Why;
+				Blocker = Who;
+				LimitGap = Gap;
 			}
 			if (StopAt >= 0.0 && (HardStop < 0.0 || StopAt < HardStop))
 			{
@@ -588,48 +775,24 @@ namespace
 			const float TurnNext = TurnSpeed(Net.Lanes[V.NextLane], P);
 			if (TurnNext > 0.0f)
 			{
-				Constrain(RammsTraffic::SlowToCap(V.Speed, TurnNext, ToLaneEnd), ERammsTrafficYield::Turn, -1.0);
+				Constrain(RammsTraffic::SlowToCap(V.Speed, TurnNext, ToLaneEnd), ERammsTrafficYield::Turn, -1.0, INDEX_NONE, ToLaneEnd);
 			}
 		}
 
 		// Car following.
 		float LeaderGap = 0.0f, LeaderSpeed = 0.0f;
-		if (FindLeader(F, V, Self, LeaderGap, LeaderSpeed))
+		int32 Leader = INDEX_NONE;
+		if (FindLeader(F, V, Self, LeaderGap, LeaderSpeed, Leader))
 		{
-			Constrain(RammsTraffic::IdmFollow(V.Speed, LeaderGap, LeaderSpeed, Idm), ERammsTrafficYield::Leader, -1.0);
+			Constrain(RammsTraffic::IdmFollow(V.Speed, LeaderGap, LeaderSpeed, Idm), ERammsTrafficYield::Leader, -1.0, Leader, LeaderGap);
 		}
 
-		// The intersection ahead: signal, stop sign, conflicting traffic.
-		if (Lane.Zone == INDEX_NONE && Net.IsValidLane(V.NextLane) && Net.Lanes[V.NextLane].Zone != INDEX_NONE)
+		// The intersection ahead (decided in the entry pass).
+		if (F.ApproachZone(V) != INDEX_NONE && V.Entry != ERammsTrafficYield::None)
 		{
-			const FRammsTrafficLane& Into = Net.Lanes[V.NextLane];
 			const float ToLine = ToLaneEnd - P.StopLineGap;
-			if (ToLine < -1.0f)
-			{
-				// Past its stopping point already (it could not stop): it is in.
-				if (!V.bGranted)
-				{
-					V.bGranted = true;
-					F.Claims[Into.Zone].Add(FClaim{ V.NextLane, Self });
-				}
-			}
-			else
-			{
-				const bool bStopSign = !(Into.bSignalized && F.bHasSignals);
-				if (bStopSign && !V.bGranted && V.Speed < 30.0f && ToLine < 150.0f)
-				{
-					V.StoppedAtLine += F.Dt;
-					if (V.ArrivalTime < 0.0f)
-					{
-						V.ArrivalTime = static_cast<float>(F.Now);
-					}
-				}
-				const ERammsTrafficYield Why = EvaluateEntry(F, V, P, Self, ToLine);
-				if (Why != ERammsTrafficYield::None)
-				{
-					Constrain(RammsTraffic::IdmFollow(V.Speed, FMath::Max(ToLine, 0.0f), 0.0, StopIdm), Why, FMath::Max(ToLine, 0.0f));
-				}
-			}
+			// Past the line without leave (it overshot): stand where it is.
+			Constrain(RammsTraffic::IdmFollow(V.Speed, FMath::Max(ToLine, 0.0f), 0.0, StopIdm), V.Entry, FMath::Max(ToLine, 0.0f), V.EntryBlocker, ToLine);
 		}
 
 		// Pedestrians and the robot in the way.
@@ -638,7 +801,7 @@ namespace
 		if (Obstacle < TNumericLimits<float>::Max())
 		{
 			const float Gap = Obstacle - P.ObstacleGap;
-			Constrain(RammsTraffic::IdmFollow(V.Speed, Gap, 0.0, StopIdm), ObstacleReason, FMath::Max(Gap, 0.0f));
+			Constrain(RammsTraffic::IdmFollow(V.Speed, Gap, 0.0, StopIdm), ObstacleReason, FMath::Max(Gap, 0.0f), INDEX_NONE, Gap);
 		}
 
 		Accel = FMath::Clamp(Accel, -static_cast<double>(P.MaxDeceleration), static_cast<double>(P.MaxAcceleration));
@@ -647,9 +810,20 @@ namespace
 		V.Speed = static_cast<float>(Speed);
 		V.Acceleration = static_cast<float>(Accel);
 		V.Yield = Reason;
-		// Waiting for a light, a pedestrian or the robot is not a gridlock.
-		const bool bLegitimateWait = Reason == ERammsTrafficYield::Signal || Reason == ERammsTrafficYield::Pedestrian || Reason == ERammsTrafficYield::Robot;
-		V.WaitTime = (V.Speed < 10.0f && !bLegitimateWait) ? V.WaitTime + F.Dt : 0.0f;
+		V.Blocker = Blocker;
+		V.LimitGap = LimitGap;
+		// The deadlock breaker counts only time stood at the line held by other vehicles' rules; time at a red light
+		// neither counts nor resets it, driving on resets it.
+		const bool bHeldByVehicles = V.Entry == ERammsTrafficYield::Claim || V.Entry == ERammsTrafficYield::Box
+			|| V.Entry == ERammsTrafficYield::OncomingLeft || (V.Entry == ERammsTrafficYield::StopSign && V.EntryBlocker != INDEX_NONE);
+		if (V.Speed < 10.0f && bHeldByVehicles)
+		{
+			V.BlockedTime += F.Dt;
+		}
+		else if (V.Speed > 100.0f)
+		{
+			V.BlockedTime = 0.0f;
+		}
 		V.Distance += static_cast<float>(Travel);
 		AdvanceLanes(F, V, Self);
 
@@ -657,25 +831,164 @@ namespace
 		ComputePose(F, V, bTrace, Transform);
 	}
 
-	/** ramms.Traffic.Debug: speed and yield reason over the car, and its corridor ahead (Level 2). */
+	/** The pedestrian lanes this vehicle is over or will cross within CrossingHoldSeconds, if it is going there. */
+	void HoldCrossings(FTrafficFrame& F, const int32 Self)
+	{
+		const FRammsTrafficNetwork& Net = *F.Net;
+		const FRammsTrafficVehicleFragment& V = *F.Vehicles[Self].V;
+		const FRammsTrafficDrivingParams& P = *F.Vehicles[Self].P;
+		if (!Net.IsValidLane(V.Lane))
+		{
+			return;
+		}
+		const FRammsTrafficLane& Lane = Net.Lanes[V.Lane];
+		const bool bInside = Lane.Zone != INDEX_NONE;
+		const bool bApproaching = F.ApproachZone(V) != INDEX_NONE;
+		// Driving on, or standing only for walkers already in its way (holding the others lets it go once they are past).
+		// Not a car stopped for a light, a queue or other traffic.
+		const bool bGoing = V.Speed > 50.0f || V.Yield == ERammsTrafficYield::Pedestrian;
+		if (!bGoing)
+		{
+			return;
+		}
+		const float Front = V.Distance + V.HalfLength;
+		const float Back = V.Distance - V.HalfLength;
+		const float Reach = Front + FMath::Clamp(V.Speed * P.CrossingHoldSeconds, 300.0f, 1200.0f);
+		for (const FRammsTrafficCrossingPoint& X : Lane.Crossings)
+		{
+			if (X.Distance >= Back - 50.0f && X.Distance <= Reach)
+			{
+				F.HeldCrossings.Add(X.PedestrianLane);
+			}
+		}
+		// On into the next lane: always out of an intersection or along a road, into one only when let in.
+		if (Net.IsValidLane(V.NextLane) && (bInside || !bApproaching || V.bGranted))
+		{
+			const float Offset = Lane.Length;
+			for (const FRammsTrafficCrossingPoint& X : Net.Lanes[V.NextLane].Crossings)
+			{
+				if (Offset + X.Distance > Reach)
+				{
+					break;
+				}
+				F.HeldCrossings.Add(X.PedestrianLane);
+			}
+		}
+	}
+
+	const TCHAR* YieldName(const ERammsTrafficYield Yield)
+	{
+		switch (Yield)
+		{
+		case ERammsTrafficYield::Leader: return TEXT("leader");
+		case ERammsTrafficYield::Signal: return TEXT("signal");
+		case ERammsTrafficYield::StopSign: return TEXT("stop sign");
+		case ERammsTrafficYield::Claim: return TEXT("claim");
+		case ERammsTrafficYield::Box: return TEXT("box");
+		case ERammsTrafficYield::OncomingLeft: return TEXT("left-yield");
+		case ERammsTrafficYield::Pedestrian: return TEXT("pedestrian");
+		case ERammsTrafficYield::Robot: return TEXT("robot");
+		case ERammsTrafficYield::Turn: return TEXT("turn");
+		default: return TEXT("free");
+		}
+	}
+
+	const TCHAR* LightName(const ERammsSignalLight Light)
+	{
+		return Light == ERammsSignalLight::Green ? TEXT("G") : Light == ERammsSignalLight::Amber ? TEXT("A") : TEXT("R");
+	}
+
+	const TCHAR* TurnName(const ERammsTrafficTurn Turn)
+	{
+		return Turn == ERammsTrafficTurn::Left ? TEXT("left") : Turn == ERammsTrafficTurn::Right ? TEXT("right") : TEXT("straight");
+	}
+
+	FString VehicleName(const FTrafficFrame& F, const int32 Index)
+	{
+		if (!F.Vehicles.IsValidIndex(Index))
+		{
+			return TEXT("-");
+		}
+		const ARammsTrafficVehicleActor* Actor = F.Vehicles[Index].Visual->Actor.Get();
+		return Actor != nullptr ? Actor->GetName() : FString::Printf(TEXT("#%d"), Index);
+	}
+
+	FString LaneName(const FTrafficFrame& F, const int32 Lane)
+	{
+		if (!F.Net->IsValidLane(Lane))
+		{
+			return TEXT("none");
+		}
+		const FRammsTrafficLane& L = F.Net->Lanes[Lane];
+		if (L.Zone == INDEX_NONE)
+		{
+			return FString::Printf(TEXT("L%d road%s"), Lane, L.bApproach ? TEXT(" approach") : TEXT(""));
+		}
+		return FString::Printf(TEXT("L%d I%d %s axis %s%s"), Lane, L.Zone, TurnName(L.Turn), L.Axis == 0 ? TEXT("X") : TEXT("Y"), L.bSignalized ? TEXT(" signal") : TEXT(" stop"));
+	}
+
+	/** ramms.Traffic.Dump: every vehicle and every intersection's claims, to LogRammsCrowd. */
+	void DumpTraffic(const FTrafficFrame& F)
+	{
+		UE_LOG(LogRammsCrowd, Display, TEXT("[Traffic dump] t=%.1f signals %s X=%s (%.1f s) Y=%s (%.1f s) walkAlongX=%d walkAlongY=%d; %d vehicles, %d held crossings"),
+			F.Now, F.bHasSignals ? TEXT("on") : TEXT("off (all-way stops)"), LightName(F.Signals.LightX), F.Signals.SecondsToChangeX, LightName(F.Signals.LightY), F.Signals.SecondsToChangeY,
+			static_cast<int32>(F.Signals.WalkAlongX), static_cast<int32>(F.Signals.WalkAlongY), F.Vehicles.Num(), F.HeldCrossings.Num());
+		for (int32 i = 0; i < F.Vehicles.Num(); ++i)
+		{
+			const FRammsTrafficVehicleFragment& V = *F.Vehicles[i].V;
+			if (!F.Net->IsValidLane(V.Lane))
+			{
+				UE_LOG(LogRammsCrowd, Display, TEXT("  %s: off the network"), *VehicleName(F, i));
+				continue;
+			}
+			const FVector Location = F.Vehicles[i].Transform->GetLocation();
+			const int32 Zone = F.ApproachZone(V);
+			FString Waits = TEXT("-");
+			if (Zone != INDEX_NONE)
+			{
+				const FRammsTrafficDrivingParams& P = *F.Vehicles[i].P;
+				const FRammsTrafficLane& Into = F.Net->Lanes[V.NextLane];
+				const FString Detail = V.Entry == ERammsTrafficYield::Signal
+					? FString::Printf(TEXT(" (%s for axis %s)"), LightName(F.Signals.GetLight(Into.Axis)), Into.Axis == 0 ? TEXT("X") : TEXT("Y"))
+					: V.EntryBlocker != INDEX_NONE ? FString::Printf(TEXT(" for %s"), *VehicleName(F, V.EntryBlocker)) : FString();
+				Waits = FString::Printf(TEXT("I%d %s: %s%s, to line %.0f cm"), Zone, TurnName(Into.Turn),
+					V.Entry == ERammsTrafficYield::None ? (V.bGranted ? TEXT("let in") : TEXT("approaching")) : YieldName(V.Entry),
+					*Detail, DistanceToLine(F, V, P));
+			}
+			UE_LOG(LogRammsCrowd, Display, TEXT("  %s at (%.0f, %.0f, %.0f) yaw %.0f: %s d=%.0f/%.0f v=%.1f km/h a=%.2f m/s2 | next %s | limit %s gap %.0f cm by %s | entry %s | granted %d leftWaiting %d blocked %.1f s stopped %.1f s arrival %.1f"),
+				*VehicleName(F, i), Location.X, Location.Y, Location.Z, F.Vehicles[i].Transform->Rotator().Yaw,
+				*LaneName(F, V.Lane), V.Distance, F.Net->Lanes[V.Lane].Length, V.Speed * 0.036f, V.Acceleration * 0.01f,
+				*LaneName(F, V.NextLane), YieldName(V.Yield), V.LimitGap, *VehicleName(F, V.Blocker), *Waits,
+				V.bGranted ? 1 : 0, V.bLeftWaiting ? 1 : 0, V.BlockedTime, V.StoppedAtLine, V.ArrivalTime);
+		}
+		for (int32 Zone = 0; Zone < F.Claims.Num(); ++Zone)
+		{
+			if (F.Claims[Zone].IsEmpty() && F.Approaching[Zone].IsEmpty())
+			{
+				continue;
+			}
+			FString Claims, Approaching;
+			for (const FClaim& C : F.Claims[Zone])
+			{
+				Claims += FString::Printf(TEXT(" L%d:%s%s"), C.Lane, *VehicleName(F, C.Vehicle), C.bInside ? TEXT("(in)") : TEXT("(let in)"));
+			}
+			for (const FApproach& A : F.Approaching[Zone])
+			{
+				Approaching += FString::Printf(TEXT(" %s->L%d %s %.0fcm %.0fkm/h"), *VehicleName(F, A.Vehicle), A.NextLane, TurnName(F.Net->Lanes[A.NextLane].Turn), A.DistanceToLine, A.Speed * 0.036f);
+			}
+			const FVector C = F.Net->Zones[Zone].Center;
+			UE_LOG(LogRammsCrowd, Display, TEXT("  I%d at (%.0f, %.0f) %s: claims%s | approaching%s"), Zone, C.X, C.Y,
+				F.Net->Zones[Zone].bSignalized ? TEXT("signalized") : TEXT("all-way stop"), Claims.IsEmpty() ? TEXT(" none") : *Claims, Approaching.IsEmpty() ? TEXT(" none") : *Approaching);
+		}
+	}
+
+	/** ramms.Traffic.Debug: what limits the car over it, and its corridor ahead (Level 2). */
 	void DrawVehicleDebug(const UWorld* World, const FRammsTrafficVehicleFragment& V, const FRammsTrafficDrivingParams& P, const FTransform& Transform, const int32 Level)
 	{
 #if ENABLE_DRAW_DEBUG
-		const TCHAR* Why = TEXT("");
-		switch (V.Yield)
-		{
-		case ERammsTrafficYield::Leader: Why = TEXT("leader"); break;
-		case ERammsTrafficYield::Signal: Why = TEXT("signal"); break;
-		case ERammsTrafficYield::StopSign: Why = TEXT("stop"); break;
-		case ERammsTrafficYield::Intersection: Why = TEXT("crossing traffic"); break;
-		case ERammsTrafficYield::Pedestrian: Why = TEXT("pedestrian"); break;
-		case ERammsTrafficYield::Robot: Why = TEXT("robot"); break;
-		case ERammsTrafficYield::Turn: Why = TEXT("turn"); break;
-		default: break;
-		}
 		const FColor Color = V.Yield == ERammsTrafficYield::None ? FColor::Green
 			: (V.Yield == ERammsTrafficYield::Pedestrian || V.Yield == ERammsTrafficYield::Robot) ? FColor::Red : FColor::Yellow;
-		DrawDebugString(World, Transform.GetLocation() + FVector(0.0, 0.0, 260.0), FString::Printf(TEXT("%.0f km/h %s"), V.Speed * 0.036f, Why), nullptr, Color, 0.0f, true);
+		DrawDebugString(World, Transform.GetLocation() + FVector(0.0, 0.0, 260.0), FString::Printf(TEXT("%.0f km/h %s"), V.Speed * 0.036f, YieldName(V.Yield)), nullptr, Color, 0.0f, true);
 		if (Level > 1)
 		{
 			const FVector Ahead = Transform.GetLocation() + Transform.GetRotation().GetForwardVector() * (V.HalfLength + FMath::Max(P.MinLookahead, V.Speed * P.LookaheadSeconds + 800.0f));
@@ -769,47 +1082,68 @@ void URammsTrafficVehicleProcessor::Execute(FMassEntityManager& EntityManager, F
 	F.Approaching.SetNum(Net->Zones.Num());
 	GatherPlayers(*World, F.Players);
 
-	// The traffic as it stands: lane occupancy, intersection claims, all-way stop arrivals, approaches.
-	int32 Dense = 0;
+	// The vehicles (pointers into their chunks), each with its next lane chosen.
 	float Predict = 0.0f;
-	VehicleQuery.ForEachEntityChunk(Context, [&F, &Dense, &Predict](FMassExecutionContext& Ctx)
+	VehicleQuery.ForEachEntityChunk(Context, [&F, &Predict](FMassExecutionContext& Ctx)
 	{
 		const FRammsTrafficDrivingParams& P = Ctx.GetConstSharedFragment<FRammsTrafficDrivingParams>();
 		Predict = FMath::Max(Predict, P.PredictSeconds);
-		const TConstArrayView<FRammsTrafficVehicleFragment> VehicleList = Ctx.GetFragmentView<FRammsTrafficVehicleFragment>();
-		const FRammsTrafficNetwork& Network = *F.Net;
+		const TArrayView<FRammsTrafficVehicleFragment> VehicleList = Ctx.GetMutableFragmentView<FRammsTrafficVehicleFragment>();
+		const TArrayView<FTransformFragment> TransformList = Ctx.GetMutableFragmentView<FTransformFragment>();
+		const TConstArrayView<FRammsTrafficVisualFragment> VisualList = Ctx.GetFragmentView<FRammsTrafficVisualFragment>();
 		for (FMassExecutionContext::FEntityIterator It = Ctx.CreateEntityIterator(); It; ++It)
 		{
-			const int32 Self = Dense++;
-			const FRammsTrafficVehicleFragment& V = VehicleList[It];
-			if (V.NetworkVersion != Network.Version || !Network.IsValidLane(V.Lane))
+			FVehicleRef& Ref = F.Vehicles.AddDefaulted_GetRef();
+			Ref.V = &VehicleList[It];
+			Ref.Transform = &TransformList[It].GetMutableTransform();
+			Ref.Visual = &VisualList[It];
+			Ref.P = &P;
+		}
+	});
+	if (F.Vehicles.IsEmpty())
+	{
+		return;
+	}
+
+	// The traffic as it stands: lane occupancy, intersection claims, all-way stop arrivals, approaches.
+	for (int32 i = 0; i < F.Vehicles.Num(); ++i)
+	{
+		FRammsTrafficVehicleFragment& V = *F.Vehicles[i].V;
+		if (V.NetworkVersion != Net->Version || !Net->IsValidLane(V.Lane))
+		{
+			continue;
+		}
+		if (!Net->IsValidLane(V.NextLane))
+		{
+			V.NextLane = ChooseNext(*Net, V.Lane, V.RandomState);
+		}
+		F.Occupancy[V.Lane].Add(FOccupant{ V.Distance, V.Speed, V.HalfLength, V.HalfWidth, i });
+		const FRammsTrafficLane& Lane = Net->Lanes[V.Lane];
+		if (Lane.Zone != INDEX_NONE)
+		{
+			F.Claims[Lane.Zone].Add(FClaim{ V.Lane, i, V.HalfLength, true });
+		}
+		else
+		{
+			// Rear still in the intersection it just left.
+			if (Net->IsValidLane(V.PrevLane) && Net->Lanes[V.PrevLane].Zone != INDEX_NONE)
 			{
-				continue;
+				F.Claims[Net->Lanes[V.PrevLane].Zone].Add(FClaim{ V.PrevLane, i, V.HalfLength, true });
 			}
-			F.Occupancy[V.Lane].Add(FOccupant{ V.Distance, V.Speed, V.HalfLength, Self });
-			const FRammsTrafficLane& Lane = Network.Lanes[V.Lane];
-			if (Lane.Zone != INDEX_NONE)
+			const int32 Zone = F.ApproachZone(V);
+			if (Zone != INDEX_NONE)
 			{
-				F.Claims[Lane.Zone].Add(FClaim{ V.Lane, Self });
-			}
-			else if (Network.IsValidLane(V.NextLane) && Network.Lanes[V.NextLane].Zone != INDEX_NONE)
-			{
-				const int32 Zone = Network.Lanes[V.NextLane].Zone;
 				if (V.bGranted)
 				{
-					F.Claims[Zone].Add(FClaim{ V.NextLane, Self });
+					F.Claims[Zone].Add(FClaim{ V.NextLane, i, V.HalfLength, false });
 				}
-				F.Approaching[Zone].Add(FApproach{ V.NextLane, Lane.Length - (V.Distance + V.HalfLength) - P.StopLineGap, V.Speed, Self });
+				F.Approaching[Zone].Add(FApproach{ V.NextLane, DistanceToLine(F, V, *F.Vehicles[i].P), V.Speed, i });
 				if (V.ArrivalTime >= 0.0f)
 				{
-					F.Waiting[Zone].Add(FWaiter{ V.NextLane, V.ArrivalTime, Self });
+					F.Waiting[Zone].Add(FWaiter{ V.NextLane, V.ArrivalTime, i });
 				}
 			}
 		}
-	});
-	if (Dense == 0)
-	{
-		return;
 	}
 	for (TArray<FOccupant>& Occupants : F.Occupancy)
 	{
@@ -824,9 +1158,9 @@ void URammsTrafficVehicleProcessor::Execute(FMassEntityManager& EntityManager, F
 		const TConstArrayView<FMassVelocityFragment> VelocityList = Ctx.GetFragmentView<FMassVelocityFragment>();
 		for (FMassExecutionContext::FEntityIterator It = Ctx.CreateEntityIterator(); It; ++It)
 		{
-			const FTransform& Transform = TransformList[It].GetTransform();
-			const FVector2D Center(Transform.GetLocation());
-			const FVector2D Forward = FVector2D(Transform.GetRotation().GetForwardVector()).GetSafeNormal();
+			const FTransform& AvatarTransform = TransformList[It].GetTransform();
+			const FVector2D Center(AvatarTransform.GetLocation());
+			const FVector2D Forward = FVector2D(AvatarTransform.GetRotation().GetForwardVector()).GetSafeNormal();
 			const FMassAvoidanceColliderFragment& Collider = ColliderList[It];
 			FObstacleCapsule Capsule;
 			double HalfLength = 0.0;
@@ -842,7 +1176,7 @@ void URammsTrafficVehicleProcessor::Execute(FMassEntityManager& EntityManager, F
 			}
 			Capsule.A = Center - Forward * HalfLength;
 			Capsule.B = Center + Forward * HalfLength;
-			Capsule.Z = static_cast<float>(Transform.GetLocation().Z);
+			Capsule.Z = static_cast<float>(AvatarTransform.GetLocation().Z);
 			F.Footprints.Add(Capsule);
 			if (!VelocityList.IsEmpty())
 			{
@@ -916,27 +1250,61 @@ void URammsTrafficVehicleProcessor::Execute(FMassEntityManager& EntityManager, F
 		}
 	});
 
+	// Who may enter which intersection: per intersection, protected movements first (nearest the line first), then
+	// left turns, so a left turn sees the oncoming vehicles let in this frame and the claims they took.
+	for (int32 i = 0; i < F.Vehicles.Num(); ++i)
+	{
+		F.Vehicles[i].V->Entry = ERammsTrafficYield::None;
+		F.Vehicles[i].V->EntryBlocker = INDEX_NONE;
+	}
+	TArray<int32> Order;
+	for (int32 Zone = 0; Zone < F.Approaching.Num(); ++Zone)
+	{
+		Order.Reset();
+		for (const FApproach& A : F.Approaching[Zone])
+		{
+			Order.Add(A.Vehicle);
+		}
+		Order.Sort([&F](const int32 A, const int32 B)
+		{
+			const bool bLeftA = IsLeft(*F.Net, F.Vehicles[A].V->NextLane);
+			const bool bLeftB = IsLeft(*F.Net, F.Vehicles[B].V->NextLane);
+			if (bLeftA != bLeftB)
+			{
+				return !bLeftA;
+			}
+			return DistanceToLine(F, *F.Vehicles[A].V, *F.Vehicles[A].P) < DistanceToLine(F, *F.Vehicles[B].V, *F.Vehicles[B].P);
+		});
+		for (const int32 i : Order)
+		{
+			FRammsTrafficVehicleFragment& V = *F.Vehicles[i].V;
+			V.Entry = DecideEntry(F, i, V.EntryBlocker);
+		}
+	}
+
 	// Drive.
 	const int32 Debug = CVarTrafficDebug.GetValueOnGameThread();
-	Dense = 0;
-	VehicleQuery.ForEachEntityChunk(Context, [&F, &Dense, Debug](FMassExecutionContext& Ctx)
+	for (int32 i = 0; i < F.Vehicles.Num(); ++i)
 	{
-		const FRammsTrafficDrivingParams& P = Ctx.GetConstSharedFragment<FRammsTrafficDrivingParams>();
-		const TArrayView<FRammsTrafficVehicleFragment> VehicleList = Ctx.GetMutableFragmentView<FRammsTrafficVehicleFragment>();
-		const TArrayView<FTransformFragment> TransformList = Ctx.GetMutableFragmentView<FTransformFragment>();
-		const TConstArrayView<FRammsTrafficVisualFragment> VisualList = Ctx.GetFragmentView<FRammsTrafficVisualFragment>();
-		for (FMassExecutionContext::FEntityIterator It = Ctx.CreateEntityIterator(); It; ++It)
+		UpdateVehicle(F, i);
+		HoldCrossings(F, i);
+		if (Debug > 0)
 		{
-			const int32 Self = Dense++;
-			FRammsTrafficVehicleFragment& V = VehicleList[It];
-			FTransform& Transform = TransformList[It].GetMutableTransform();
-			UpdateVehicle(F, V, VisualList[It], P, Self, Transform);
-			if (Debug > 0)
-			{
-				DrawVehicleDebug(F.World, V, P, Transform, Debug);
-			}
+			DrawVehicleDebug(F.World, *F.Vehicles[i].V, *F.Vehicles[i].P, *F.Vehicles[i].Transform, Debug);
 		}
-	});
+	}
+
+	// ramms.Traffic.Dump (and ramms.Traffic.DumpInterval).
+	const float Interval = CVarTrafficDumpInterval.GetValueOnGameThread();
+	const int32 Requests = URammsTrafficSubsystem::GetDumpRequestSerial();
+	if (Requests != SeenDumpRequests || (Interval > 0.0f && F.Now - LastDumpTime >= Interval))
+	{
+		SeenDumpRequests = Requests;
+		LastDumpTime = F.Now;
+		DumpTraffic(F);
+	}
+
+	Traffic->SetHeldCrossings(MoveTemp(F.HeldCrossings));
 }
 
 //----------------------------------------------------------------------//

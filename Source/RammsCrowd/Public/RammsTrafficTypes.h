@@ -46,15 +46,23 @@ enum class ERammsTrafficTurn : uint8
 	Left,
 };
 
-/** Why a vehicle is braking (debug, ramms.Traffic.Debug). */
+/** What limits a vehicle's acceleration, or keeps it out of the intersection ahead (ramms.Traffic.Debug / Dump). */
 UENUM()
 enum class ERammsTrafficYield : uint8
 {
 	None,
+	/** The car ahead (its lane, its next lanes, or a lane diverging from its own that it is still beside). */
 	Leader,
+	/** Red, or amber it can stop for. */
 	Signal,
+	/** All-way stop: standing its second at the line, or another car arrived first. */
 	StopSign,
-	Intersection,
+	/** A car on a crossing, merging or too-close lane is in the intersection or has been let in. */
+	Claim,
+	/** No room on its exit beyond the queue there (it would block the box). */
+	Box,
+	/** Permitted left turn: oncoming straight or right-turning traffic first. */
+	OncomingLeft,
 	Pedestrian,
 	Robot,
 	Turn,
@@ -229,9 +237,16 @@ struct RAMMSCROWD_API FRammsTrafficDrivingParams : public FMassConstSharedFragme
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Ramms|Traffic|Rules", meta = (ClampMin = "0.0", Units = "s"))
 	float LeftTurnGapSeconds = 4.5f;
 
-	/** A vehicle kept waiting this long by other vehicles (not by a red light, a pedestrian or the robot) goes anyway: breaks deadlocks. */
+	/** Deadlock breaker: a vehicle that has stood this long in all at its stop line held by other vehicles' rules
+	 *  (claims, arrival order, the box, oncoming traffic; time at a red light neither counts nor resets it) enters
+	 *  as soon as no vehicle on a conflicting lane is physically in the intersection. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Ramms|Traffic|Rules", meta = (ClampMin = "1.0", Units = "s"))
-	float MaxWaitSeconds = 25.0f;
+	float MaxWaitSeconds = 20.0f;
+
+	/** Pedestrians do not step onto a crossing a vehicle will be over within this many seconds (it is in or let into
+	 *  the intersection, or driving on), nor onto one under a vehicle; at least 3 m, at most 12 m ahead of it. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Ramms|Traffic|Yield", meta = (ClampMin = "0.0", Units = "s"))
+	float CrossingHoldSeconds = 2.0f;
 
 	/** Pedestrians and the robot count as in the vehicle's way within its half width plus this, either side of its path. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Ramms|Traffic|Yield", meta = (ClampMin = "0.0", Units = "cm"))
@@ -275,17 +290,28 @@ struct RAMMSCROWD_API FRammsTrafficVehicleFragment : public FMassFragment
 	/** All-way stop: seconds stood at the line, and when it got there (world time; -1 = not yet). */
 	float StoppedAtLine = 0.0f;
 	float ArrivalTime = -1.0f;
-	/** Seconds at a standstill. */
-	float WaitTime = 0.0f;
+	/** Seconds stood at the stop line held by other vehicles' rules (see MaxWaitSeconds). */
+	float BlockedTime = 0.0f;
 	/** Deterministic per-vehicle random stream (route choices). */
 	uint32 RandomState = 1;
 	/** Index into the spawner's car meshes. */
 	int32 Visual = INDEX_NONE;
+	/** The intersection lane it just left, while its rear is still in the intersection (it keeps that claim). */
+	int32 PrevLane = INDEX_NONE;
 	/** May enter the intersection ahead (all-way stop turn taken, or signal and gaps checked). */
 	bool bGranted = false;
+	/** A permitted left turn that waited at the line for oncoming traffic this green: it may go on the amber. */
+	bool bLeftWaiting = false;
 	/** Moved discontinuously this frame (spawned, respawned): the representation teleports. */
 	bool bTeleport = true;
+	/** What limited its acceleration this frame, and the entry decision for the intersection ahead. */
 	ERammsTrafficYield Yield = ERammsTrafficYield::None;
+	ERammsTrafficYield Entry = ERammsTrafficYield::None;
+	/** The vehicle behind what limits it (this frame's traffic index; INDEX_NONE), the one it waits for to enter, and
+	 *  the gap to what limits it, cm. */
+	int32 Blocker = INDEX_NONE;
+	int32 EntryBlocker = INDEX_NONE;
+	float LimitGap = 0.0f;
 	FVector Velocity = FVector::ZeroVector;
 };
 

@@ -10,6 +10,7 @@
 #include "MassNavigationFragments.h"
 #include "MassZoneGraphNavigationFragments.h"
 #include "RammsCrowdAgentTrait.h"
+#include "RammsTrafficSubsystem.h"
 #include "ZoneGraphSubsystem.h"
 
 URammsCrossingGateProcessor::URammsCrossingGateProcessor()
@@ -45,8 +46,11 @@ void URammsCrossingGateProcessor::Execute(FMassEntityManager& EntityManager, FMa
 	{
 		return;
 	}
+	// Crossings a traffic vehicle is over or about to cross (none without traffic).
+	const URammsTrafficSubsystem* Traffic = UWorld::GetSubsystem<URammsTrafficSubsystem>(World);
+	const URammsTrafficSubsystem* Held = Traffic != nullptr && Traffic->GetHeldCrossingCount() > 0 ? Traffic : nullptr;
 
-	EntityQuery.ForEachEntityChunk(Context, [Crowd, ZoneGraph, CrossingTag](FMassExecutionContext& Context)
+	EntityQuery.ForEachEntityChunk(Context, [Crowd, ZoneGraph, CrossingTag, Held](FMassExecutionContext& Context)
 	{
 		const TConstArrayView<FMassZoneGraphLaneLocationFragment> LaneList = Context.GetFragmentView<FMassZoneGraphLaneLocationFragment>();
 		const TArrayView<FMassMoveTargetFragment> MoveTargetList = Context.GetMutableFragmentView<FMassMoveTargetFragment>();
@@ -62,6 +66,8 @@ void URammsCrossingGateProcessor::Execute(FMassEntityManager& EntityManager, FMa
 				{
 					bHold = Crowd->GetLaneState(Location.LaneHandle) == ECrowdLaneState::Closed;
 				}
+				// Nobody steps in front of a car that is clearing the intersection or driving over the crossing.
+				bHold = bHold || (Held != nullptr && Held->IsCrossingHeld(Location.LaneHandle));
 			}
 
 			FMassMoveTargetFragment& MoveTarget = MoveTargetList[EntityIt];

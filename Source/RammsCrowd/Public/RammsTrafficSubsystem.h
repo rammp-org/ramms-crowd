@@ -12,6 +12,14 @@ class AZoneGraphData;
 class ARammsTrafficSignalClock;
 struct FZoneGraphStorage;
 
+/** Where a pedestrian lane (MassCrowd CrowdTag: a street crossing) crosses a vehicle lane. */
+struct RAMMSCROWD_API FRammsTrafficCrossingPoint
+{
+	FZoneGraphLaneHandle PedestrianLane;
+	/** Along the vehicle lane, cm. */
+	float Distance = 0.0f;
+};
+
 /** One vehicle lane of the traffic network (a ZoneGraph lane with the Vehicle tag). */
 struct RAMMSCROWD_API FRammsTrafficLane
 {
@@ -33,6 +41,10 @@ struct RAMMSCROWD_API FRammsTrafficLane
 	TArray<int32, TInlineAllocator<4>> Next;
 	/** Intersection lanes of the same zone this one crosses, merges with or passes too close to. */
 	TArray<int32, TInlineAllocator<8>> Conflicts;
+	/** Intersection lanes of the same zone that start at the same entry (they diverge from this one). */
+	TArray<int32, TInlineAllocator<4>> Siblings;
+	/** Pedestrian lanes that cross this lane, by distance along it. */
+	TArray<FRammsTrafficCrossingPoint> Crossings;
 };
 
 /** A controlled intersection: a ZoneGraph polygon whose lanes carry the Intersection tag. */
@@ -91,11 +103,22 @@ public:
 	/** Network rebuilds so far (vehicles holding an older version re-place themselves). */
 	int32 GetNetworkVersion() const { return Network.Version; }
 
+	/** Pedestrian lanes a vehicle is over or about to cross (set by the traffic each frame): URammsCrossingGateProcessor
+	 *  holds walkers at their start, so nobody steps in front of a car clearing the intersection. */
+	void SetHeldCrossings(TSet<FZoneGraphLaneHandle>&& InHeld) { HeldCrossings = MoveTemp(InHeld); }
+	bool IsCrossingHeld(const FZoneGraphLaneHandle& Lane) const { return HeldCrossings.Contains(Lane); }
+	int32 GetHeldCrossingCount() const { return HeldCrossings.Num(); }
+
+	/** ramms.Traffic.Dump: requests are counted globally (any world) and served by the next traffic frame. */
+	static void RequestDump();
+	static int32 GetDumpRequestSerial();
+
 private:
 	void HandleZoneGraphChanged(const AZoneGraphData* ZoneGraphData);
 	void BuildNetwork();
 
 	FRammsTrafficNetwork Network;
+	TSet<FZoneGraphLaneHandle> HeldCrossings;
 	bool bNetworkDirty = true;
 	bool bWarnedNoLanes = false;
 	TWeakObjectPtr<ARammsTrafficSignalClock> SignalClock;

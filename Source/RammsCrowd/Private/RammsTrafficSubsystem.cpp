@@ -3,6 +3,8 @@
 #include "RammsTrafficSubsystem.h"
 
 #include "Engine/World.h"
+#include "HAL/IConsoleManager.h"
+#include "MassCrowdSettings.h"
 #include "Math/UnrealMathUtility.h"
 #include "RammsCrowdLog.h"
 #include "RammsTrafficSignalClock.h"
@@ -34,6 +36,50 @@ namespace
 		}
 		return Best;
 	}
+
+	/** Where segment A0-A1 crosses B0-B1 (2D), as a fraction of A; false when they do not cross. */
+	bool SegmentsCross2D(const FVector2D& A0, const FVector2D& A1, const FVector2D& B0, const FVector2D& B1, double& OutT)
+	{
+		const FVector2D R = A1 - A0;
+		const FVector2D S = B1 - B0;
+		const double Den = R.X * S.Y - R.Y * S.X;
+		if (FMath::Abs(Den) < 1.0e-6)
+		{
+			return false;
+		}
+		const FVector2D Q = B0 - A0;
+		const double T = (Q.X * S.Y - Q.Y * S.X) / Den;
+		const double U = (Q.X * R.Y - Q.Y * R.X) / Den;
+		OutT = T;
+		return T >= 0.0 && T <= 1.0 && U >= 0.0 && U <= 1.0;
+	}
+
+	FBox2D LaneBounds2D(const FZoneGraphStorage& Storage, const FZoneLaneData& Data)
+	{
+		FBox2D Box(ForceInit);
+		for (int32 i = Data.PointsBegin; i < Data.PointsEnd; ++i)
+		{
+			Box += FVector2D(Storage.LanePoints[i]);
+		}
+		return Box;
+	}
+
+	int32 GTrafficDumpRequests = 0;
+
+	FAutoConsoleCommand GTrafficDumpCommand(
+		TEXT("ramms.Traffic.Dump"),
+		TEXT("Log every Mass traffic vehicle (lane, distance, speed, next lane and turn, what limits its acceleration and what it waits for) and every intersection's claims, once, on the next traffic frame (LogRammsCrowd). ramms.Traffic.DumpInterval repeats it."),
+		FConsoleCommandDelegate::CreateStatic(&URammsTrafficSubsystem::RequestDump));
+}
+
+void URammsTrafficSubsystem::RequestDump()
+{
+	++GTrafficDumpRequests;
+}
+
+int32 URammsTrafficSubsystem::GetDumpRequestSerial()
+{
+	return GTrafficDumpRequests;
 }
 
 void URammsTrafficSubsystem::Initialize(FSubsystemCollectionBase& Collection)
@@ -265,6 +311,89 @@ void URammsTrafficSubsystem::BuildNetwork()
 		}
 	}
 
+	// Diverging lanes (same zone, same entry): a car that just turned off is still beside a car going on.
+	for (const FRammsTrafficZone& Zone : Network.Zones)
+	{
+		for (const int32 A : Zone.Lanes)
+		{
+			for (const int32 B : Zone.Lanes)
+			{
+				if (A != B && Network.Lanes[A].StartEntry == Network.Lanes[B].StartEntry)
+				{
+					Network.Lanes[A].Siblings.Add(B);
+				}
+			}
+		}
+	}
+
+	// Pedestrian lanes (MassCrowd's CrowdTag) that cross each vehicle lane: the street crossings.
+	int32 CrossingPoints = 0;
+	const UMassCrowdSettings* CrowdSettings = GetDefault<UMassCrowdSettings>();
+	if (CrowdSettings != nullptr && CrowdSettings->CrowdTag.IsValid())
+	{
+		struct FPedestrianLane
+		{
+			FZoneGraphLaneHandle Handle;
+			const FZoneGraphStorage* Storage = nullptr;
+			int32 Index = 0;
+			FBox2D Bounds;
+		};
+		TArray<FPedestrianLane> PedestrianLanes;
+		for (const FRegisteredZoneGraphData& Registered : ZoneGraph->GetRegisteredZoneGraphData())
+		{
+			if (!Registered.bInUse || Registered.ZoneGraphData == nullptr)
+			{
+				continue;
+			}
+			const FZoneGraphStorage& Storage = Registered.ZoneGraphData->GetStorage();
+			for (int32 LaneIndex = 0; LaneIndex < Storage.Lanes.Num(); ++LaneIndex)
+			{
+				const FZoneLaneData& Data = Storage.Lanes[LaneIndex];
+				if (Data.Tags.Contains(CrowdSettings->CrowdTag) && !Data.Tags.Contains(VehicleTag) && Data.PointsEnd - Data.PointsBegin >= 2)
+				{
+					PedestrianLanes.Add(FPedestrianLane{ FZoneGraphLaneHandle(LaneIndex, Storage.DataHandle), &Storage, LaneIndex, LaneBounds2D(Storage, Data) });
+				}
+			}
+		}
+		for (FRammsTrafficLane& Lane : Network.Lanes)
+		{
+			const FZoneGraphStorage* Storage = ZoneGraph->GetZoneGraphStorage(Lane.Handle.DataHandle);
+			if (Storage == nullptr)
+			{
+				continue;
+			}
+			const FZoneLaneData& Data = Storage->Lanes[Lane.Handle.Index];
+			const FBox2D Bounds = LaneBounds2D(*Storage, Data).ExpandBy(10.0);
+			for (const FPedestrianLane& Pedestrian : PedestrianLanes)
+			{
+				if (!Bounds.Intersect(Pedestrian.Bounds))
+				{
+					continue;
+				}
+				const FZoneLaneData& PedestrianData = Pedestrian.Storage->Lanes[Pedestrian.Index];
+				bool bFound = false;
+				for (int32 i = Data.PointsBegin; i + 1 < Data.PointsEnd && !bFound; ++i)
+				{
+					const FVector2D A0(Storage->LanePoints[i]);
+					const FVector2D A1(Storage->LanePoints[i + 1]);
+					for (int32 j = PedestrianData.PointsBegin; j + 1 < PedestrianData.PointsEnd; ++j)
+					{
+						double T = 0.0;
+						if (SegmentsCross2D(A0, A1, FVector2D(Pedestrian.Storage->LanePoints[j]), FVector2D(Pedestrian.Storage->LanePoints[j + 1]), T))
+						{
+							const float Along = Storage->LanePointProgressions[i] + static_cast<float>(T) * (Storage->LanePointProgressions[i + 1] - Storage->LanePointProgressions[i]);
+							Lane.Crossings.Add(FRammsTrafficCrossingPoint{ Pedestrian.Handle, Along });
+							++CrossingPoints;
+							bFound = true;
+							break;
+						}
+					}
+				}
+			}
+			Lane.Crossings.Sort([](const FRammsTrafficCrossingPoint& A, const FRammsTrafficCrossingPoint& B) { return A.Distance < B.Distance; });
+		}
+	}
+
 	int32 Signalized = 0;
 	for (const FRammsTrafficZone& Zone : Network.Zones)
 	{
@@ -282,8 +411,8 @@ void URammsTrafficSubsystem::BuildNetwork()
 	}
 	if (!Network.IsEmpty())
 	{
-		UE_LOG(LogRammsCrowd, Display, TEXT("Traffic network v%d: %d vehicle lanes, %d intersections (%d signalized), %d lane conflicts, %d dead ends."),
-			Network.Version, Network.Lanes.Num(), Network.Zones.Num(), Signalized, Conflicts, DeadEnds);
+		UE_LOG(LogRammsCrowd, Display, TEXT("Traffic network v%d: %d vehicle lanes, %d intersections (%d signalized), %d lane conflicts, %d dead ends, %d pedestrian crossing points."),
+			Network.Version, Network.Lanes.Num(), Network.Zones.Num(), Signalized, Conflicts, DeadEnds, CrossingPoints);
 		if (DeadEnds > 0)
 		{
 			UE_LOG(LogRammsCrowd, Warning, TEXT("Traffic: %d vehicle lanes lead nowhere (a road and an intersection that do not meet); cars reaching one start again elsewhere. 'log LogRammsCrowd Verbose' lists them."), DeadEnds);

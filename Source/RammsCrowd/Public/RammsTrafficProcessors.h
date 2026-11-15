@@ -23,16 +23,30 @@
  *  - signalized (lanes tagged Signalized, a signal clock in the world): green goes, amber goes unless it can
  *    stop comfortably, red stops unless it can no longer stop. Straight and right on green are protected; a left
  *    turn is permitted on green but waits for oncoming straight and right-turning traffic within
- *    LeftTurnGapSeconds of its line. No turns on red.
+ *    LeftTurnGapSeconds of its line (or let in already), never for another left turn or for one standing at its
+ *    line held by something else. No turns on red.
  *  - otherwise (all-way stop): stop at the line for AllWayStopSeconds, then go in arrival order among vehicles
  *    whose lanes conflict.
  *  - always: nobody enters while a vehicle on a conflicting lane (crossing, merging or passing too close) is in
- *    the intersection or has been let in. A vehicle held only by other vehicles for MaxWaitSeconds goes anyway.
+ *    the intersection or has been let in, nor when its exit has no room for it beyond a slow queue there (less the
+ *    cars already let in to that exit). A vehicle held at its line by other vehicles' rules for MaxWaitSeconds in
+ *    all (time at a red light does not count) enters once no conflicting vehicle is physically in the
+ *    intersection.
  *
  * Height and pitch come from the lanes (traced onto the generated road when they were built), refined by two
  * ground traces (front and rear axle) near the player, so cars follow grades, crowns and humps.
  *
- * ramms.Traffic.Debug 1 draws each vehicle's speed and what it is yielding to.
+ * Entry decisions are made per intersection in one pass before anyone moves: protected movements first, then left
+ * turns, so a left turn sees the oncoming vehicles let in this frame. A permitted left that waited at the line for
+ * oncoming traffic goes on the amber (and the all red after it). Claims are only taken within a decision distance of
+ * the line. A car that has just turned off a shared entry stays the leader of the car behind it until their lanes
+ * have separated. Walkers are held at the start of any crossing a car is over or about to cross
+ * (URammsTrafficSubsystem::SetHeldCrossings), so a car clearing the intersection is not trapped by the next Walk.
+ *
+ * ramms.Traffic.Debug 1 draws each vehicle's speed and what limits it; ramms.Traffic.Dump logs every vehicle (lane,
+ * distance, speed, next lane and turn, the limiting term and the vehicle behind it, the entry decision and who it
+ * waits for, claim and stop state) and every intersection's claims and approaches; ramms.Traffic.DumpInterval N
+ * repeats the dump every N s.
  */
 UCLASS()
 class RAMMSCROWD_API URammsTrafficVehicleProcessor : public UMassProcessor
@@ -49,6 +63,10 @@ protected:
 	FMassEntityQuery VehicleQuery;
 	FMassEntityQuery AvatarQuery;
 	FMassEntityQuery CrowdQuery;
+
+	/** ramms.Traffic.Dump requests served so far, and when the last dump was (ramms.Traffic.DumpInterval). */
+	int32 SeenDumpRequests = 0;
+	double LastDumpTime = 0.0;
 };
 
 /**

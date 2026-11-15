@@ -57,22 +57,37 @@ MassTraffic: no lane changes, no parking manoeuvres, no turning wheels.
 | `URammsTrafficVehicleProcessor` | Per frame on the game thread: a lane occupancy index, intersection claims, all-way stop arrivals, the crowd's pedestrians (now and `PredictSeconds` ahead) and the robot footprints (the player avatar entities, as for `URammsRobotClearanceProcessor`, else the player pawns' bounds); then each car's acceleration is the lowest of IDM on a free road, IDM behind its leader (its lane and the next two), its turn speed, its stop line, and IDM behind the nearest pedestrian or robot in its corridor (path ahead, half width + `CorridorMargin`). It never moves past a stop it has to make. Height and pitch follow the lanes, plus two axle ground traces near the player. |
 | `ARammsTrafficVehicleActor` | One per car, moved kinematically by `URammsTrafficVisualProcessor`: the car mesh (movable: shadows, motion vectors, ray tracing; query-only collision of object type Vehicle, so CPU traces hit the mesh) and a physics-only box over its footprint (the Chaos robot bumps a solid kinematic shape). Collision switches off beyond `CollisionRadius` of the player. Tagged `seg:Car`. `GetVelocity` reports the car's speed. |
 | `ARammsTrafficSignalClock` | One global phase (`FRammsSignalTiming`: X green, X amber, all red, Y green, Y amber, all red; Walk for the parallel crossing, then Flashing Don't Walk for `PedestrianClearanceSeconds`). Drives the signal heads through a material parameter collection (`SignalParameters`: `GreenX`, `AmberX`, `RedX`, `GreenY`, `AmberY`, `RedY`, `WalkX`, `HandX`, `WalkY`, `HandY`), and opens each crowd crossing lane (MassCrowd `CrowdTag` + `CrossingTag`) while its walkers have Walk (`UMassCrowdSubsystem::SetLaneState`). |
-| `URammsCrossingGateProcessor` | Holds a pedestrian at the start of a closed crossing lane (zero desired speed, given back when it opens). Untouched where no lane carries the Crossing tag. |
+| `URammsCrossingGateProcessor` | Holds a pedestrian at the start of a closed crossing lane, or of one a car is over or about to cross (zero desired speed, given back when it opens). Untouched without crossing-tagged lanes and traffic. |
 
 Intersection rules: at a signalized intersection green goes, amber goes unless it can stop
 with `AmberStopDeceleration`, red stops unless it can no longer stop with `MaxDeceleration`;
 straight and right turns are protected, a left turn is permitted on green but waits for
-oncoming straight and right-turning traffic within `LeftTurnGapSeconds`; no turns on red.
-Elsewhere (or with no clock in the level) every intersection is an all-way stop: stand at
-the line for `AllWayStopSeconds`, then go in arrival order among conflicting lanes. Always:
-nobody enters while a car on a conflicting lane is in the intersection or has been let in, nor
-when its exit has no room (no blocking the box); a car held only by other cars for
-`MaxWaitSeconds` goes anyway. Cars stop for pedestrians and the robot anywhere in their
-corridor, so turning cars yield at the crossings and nobody drives into the robot.
+oncoming straight and right-turning traffic that has been let in or will reach its line within
+`LeftTurnGapSeconds` (never for another left turn, nor for a car standing at its line held by
+something else), and a left turn that waited at the line goes on the amber and the all red after
+it; no turns on red. Elsewhere (or with no clock in the level) every intersection is an all-way
+stop: stand at the line for `AllWayStopSeconds`, then go in arrival order among conflicting
+lanes. Each frame the entry decisions are made per intersection before anyone moves, protected
+movements first, and claims are only taken within a stopping distance (at least 15 m) of the
+line. Always: nobody enters while a car on a conflicting lane is in the intersection (its rear
+too) or has been let in, nor when its exit has no room beyond a slow queue there, less the cars
+already let in to it (no blocking the box). A car held at its line by other cars' rules for
+`MaxWaitSeconds` in all (time at a red light does not count) enters as soon as no conflicting car
+is physically in the intersection. A car that has just turned off a shared entry stays the
+leader of the one behind it until their lanes have separated. Cars stop for pedestrians and the
+robot anywhere in their corridor, so turning cars yield at the crossings and nobody drives into
+the robot; and walkers do not step onto a crossing a car is over or about to cross
+(`CrossingHoldSeconds`, 3 to 12 m: `URammsCrossingGateProcessor` holds them at its start), so a car
+clearing the intersection after the lights changed is not trapped by the next Walk.
 
-`ramms.Traffic.Debug 1` draws each car's speed and what it is yielding to (2: also its
-corridor). The pure rules (IDM, stop lines, the signal cycle, turn classification) are tested
-in `Ramms.Crowd.Traffic.*`.
+`ramms.Traffic.Debug 1` draws each car's speed and what limits it (2: also its corridor).
+`ramms.Traffic.Dump` logs every car (lane and whether it is a road or an intersection's turning
+lane, distance, speed, acceleration, next lane and turn, the limiting term -- leader, signal,
+stop sign, claim, box, left-yield, pedestrian, robot, turn -- with the car behind it, the entry
+decision and the car it waits for, claim, left-wait, deadlock and stop timers) and every
+intersection's claims and approaching cars, to `LogRammsCrowd`; `ramms.Traffic.DumpInterval N`
+repeats it every N s. The pure rules (IDM, stop lines, the signal cycle, turn classification) are
+tested in `Ramms.Crowd.Traffic.*`.
 
 Not yet: MuJoCo does not see the cars (they are Unreal kinematic bodies), one phase for every
 signal (no per-intersection offsets), wheels do not turn.
