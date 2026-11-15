@@ -13,9 +13,13 @@
 #include "HAL/IConsoleManager.h"
 #include "MassCommonFragments.h"
 #include "MassCommonTypes.h"
+#include "MassCrowdSettings.h"
+#include "MassCrowdSubsystem.h"
 #include "MassExecutionContext.h"
 #include "MassMovementFragments.h"
 #include "MassNavigationFragments.h"
+#include "MassZoneGraphNavigationFragments.h"
+#include "RammsCrossingGateProcessor.h"
 #include "RammsCrowdAgentTrait.h"
 #include "RammsCrowdLog.h"
 #include "RammsPlayerAvatarTrait.h"
@@ -83,11 +87,42 @@ namespace
 		int32 Vehicle = INDEX_NONE;
 	};
 
+	/** Below this a walker is standing; above MovingSpeed it is walking somewhere (and checked where it will be), cm/s. */
+	constexpr float StandingSpeed = 25.0f;
+	constexpr float MovingSpeed = 50.0f;
+
+	/** A crowd member this frame (for the corridors and ramms.Traffic.Dump). */
+	struct FWalker
+	{
+		FMassEntityHandle Entity;
+		FVector Location = FVector::ZeroVector;
+		FVector2D Velocity = FVector2D::ZeroVector;
+		float Radius = 35.0f;
+		/** Its ZoneGraph lane (invalid: none), how far along it is, and the lane's length, cm. */
+		FZoneGraphLaneHandle Lane;
+		float LaneDistance = 0.0f;
+		float LaneLength = 0.0f;
+		/** On a street crossing: how far along it its first vehicle lane is, cm; -1 on any other lane. */
+		float RoadAt = -1.0f;
+		/** Its move target's desired speed (-1: no move target) and action. */
+		float DesiredSpeed = -1.0f;
+		EMassMovementAction Action = EMassMovementAction::Move;
+		/** Held at the start of its crossing (URammsCrossingGateProcessor), and when it came onto its lane. */
+		bool bHeld = false;
+		float LaneSince = 0.0f;
+		/** Waiting, not crossing: held, or standing at the start of a street crossing or on any other lane. Cars do
+		 *  not wait for it (they wait for walkers on the crossing, and for anyone walking into their way). */
+		bool bWaiting = false;
+	};
+
 	struct FObstaclePoint
 	{
 		FVector2D Position = FVector2D::ZeroVector;
 		float Radius = 0.0f;
 		float Z = 0.0f;
+		/** The walker (FTrafficFrame::Walkers), and 0 where it is, else where it will be in Step / 2 of PredictSeconds. */
+		int32 Walker = INDEX_NONE;
+		uint8 Step = 0;
 	};
 
 	struct FObstacleCapsule
@@ -152,12 +187,21 @@ namespace
 		TArray<TArray<FWaiter>> Waiting;
 		TArray<TArray<FApproach>> Approaching;
 
+		TArray<FWalker> Walkers;
 		TArray<FObstaclePoint> Pedestrians;
 		FPointGrid PedestrianGrid;
 		float MaxPedestrianRadius = 0.0f;
+		float Predict = 0.0f;
 		TArray<FObstacleCapsule> Footprints;
 		TArray<FVector> Players;
-		TSet<FZoneGraphLaneHandle> HeldCrossings;
+		/** Street crossings walkers wait at, each for those who come onto it at or after the time (see URammsTrafficSubsystem::SetHeldCrossings). */
+		TMap<FZoneGraphLaneHandle, float> HeldCrossings;
+
+		void Hold(const FZoneGraphLaneHandle& Lane, const float Since)
+		{
+			float& Held = HeldCrossings.FindOrAdd(Lane, Since);
+			Held = FMath::Min(Held, Since);
+		}
 
 		bool Sample(const int32 Lane, const float Distance, FZoneGraphLaneLocation& Out) const
 		{
@@ -206,6 +250,49 @@ namespace
 			return Net->Lanes[V.NextLane].Zone;
 		}
 	};
+
+	FString VehicleName(const FTrafficFrame& F, const int32 Index)
+	{
+		if (!F.Vehicles.IsValidIndex(Index))
+		{
+			return TEXT("-");
+		}
+		const ARammsTrafficVehicleActor* Actor = F.Vehicles[Index].Visual->Actor.Get();
+		return Actor != nullptr ? Actor->GetName() : FString::Printf(TEXT("#%d"), Index);
+	}
+
+	/** A walker for the log: who, where, its lane and what the crossing gate and its move target say. */
+	FString WalkerText(const FTrafficFrame& F, const int32 Index, const int32 Step)
+	{
+		if (!F.Walkers.IsValidIndex(Index))
+		{
+			return TEXT("-");
+		}
+		const FWalker& W = F.Walkers[Index];
+		FString LaneText = TEXT("no lane");
+		if (W.Lane.IsValid())
+		{
+			FString Kind = W.RoadAt >= 0.0f ? FString::Printf(TEXT("street crossing, road at %.0f"), W.RoadAt) : FString(TEXT("not a street crossing"));
+			const UMassCrowdSettings* CrowdSettings = GetDefault<UMassCrowdSettings>();
+			const UMassCrowdSubsystem* Crowd = UWorld::GetSubsystem<UMassCrowdSubsystem>(F.World);
+			FZoneGraphTagMask Tags;
+			if (CrowdSettings != nullptr && CrowdSettings->CrossingTag.IsValid() && Crowd != nullptr && F.ZoneGraph->GetLaneTags(W.Lane, Tags)
+				&& Tags.Contains(CrowdSettings->CrossingTag) && Crowd->HasCrowdDataForZoneGraph(W.Lane.DataHandle))
+			{
+				Kind += Crowd->GetLaneState(W.Lane) == ECrowdLaneState::Closed ? TEXT(", signal closed") : TEXT(", signal open");
+			}
+			if (const float* Since = F.HeldCrossings.Find(W.Lane))
+			{
+				Kind += *Since <= TNumericLimits<float>::Lowest() ? FString(TEXT(", held for all")) : FString::Printf(TEXT(", held for those on after t=%.1f"), *Since);
+			}
+			LaneText = FString::Printf(TEXT("lane %s (%s) d=%.0f/%.0f on since t=%.1f"), *W.Lane.ToString(), *Kind, W.LaneDistance, W.LaneLength, W.LaneSince);
+		}
+		const FString Ahead = Step > 0 ? FString::Printf(TEXT(" (point %.1f s ahead of it)"), F.Predict * Step * 0.5f) : FString();
+		const TCHAR* Action = W.Action == EMassMovementAction::Stand ? TEXT("stand") : W.Action == EMassMovementAction::Animate ? TEXT("animate") : TEXT("move");
+		return FString::Printf(TEXT("E%d at (%.0f, %.0f, %.0f) %.2f m/s%s, %s, gate held %d, desired %.0f cm/s %s%s"),
+			W.Entity.Index, W.Location.X, W.Location.Y, W.Location.Z, W.Velocity.Size() * 0.01f, *Ahead, *LaneText,
+			W.bHeld ? 1 : 0, W.DesiredSpeed, Action, W.bWaiting ? TEXT(", waiting") : TEXT(""));
+	}
 
 	/** Front bumper to the stopping point at the end of the vehicle's (approach) lane. */
 	float DistanceToLine(const FTrafficFrame& F, const FRammsTrafficVehicleFragment& V, const FRammsTrafficDrivingParams& P)
@@ -519,9 +606,13 @@ namespace
 		return ERammsTrafficYield::None;
 	}
 
-	/** Distance from the front bumper to the first pedestrian or robot in the vehicle's corridor ahead, or +inf. */
-	float ScanCorridor(const FTrafficFrame& F, const FRammsTrafficVehicleFragment& V, const FRammsTrafficDrivingParams& P, ERammsTrafficYield& OutReason)
+	/**
+	 * Distance from the front bumper to the first pedestrian or robot in the vehicle's corridor ahead, or +inf; and
+	 * which (the obstacle point or the footprint). Walkers waiting at the kerb have no points (see FWalker::bWaiting).
+	 */
+	float ScanCorridor(const FTrafficFrame& F, const FRammsTrafficVehicleFragment& V, const FRammsTrafficDrivingParams& P, ERammsTrafficYield& OutReason, int32& OutObstacle)
 	{
+		OutObstacle = INDEX_NONE;
 		if (F.Pedestrians.IsEmpty() && F.Footprints.IsEmpty())
 		{
 			return TNumericLimits<float>::Max();
@@ -539,25 +630,29 @@ namespace
 			}
 			const FVector2D Here(Location.Position);
 			const float Z = static_cast<float>(Location.Position.Z);
-			bool bPedestrian = false;
+			int32 Hit = INDEX_NONE;
 			F.PedestrianGrid.ForEachNear(Here, HalfWidth + F.MaxPedestrianRadius, [&](const int32 Index)
 			{
 				const FObstaclePoint& O = F.Pedestrians[Index];
-				if (!bPedestrian && FMath::Abs(O.Z - Z) < 250.0f && FVector2D::DistSquared(Here, O.Position) < FMath::Square(HalfWidth + O.Radius))
+				if (Hit == INDEX_NONE && FMath::Abs(O.Z - Z) < 250.0f && FVector2D::DistSquared(Here, O.Position) < FMath::Square(HalfWidth + O.Radius)
+					&& !(V.PastStandingWalkers > 0.0f && F.Walkers[O.Walker].Velocity.SizeSquared() < FMath::Square(StandingSpeed)))
 				{
-					bPedestrian = true;
+					Hit = Index;
 				}
 			});
-			if (bPedestrian)
+			if (Hit != INDEX_NONE)
 			{
 				OutReason = ERammsTrafficYield::Pedestrian;
+				OutObstacle = Hit;
 				return S;
 			}
-			for (const FObstacleCapsule& C : F.Footprints)
+			for (int32 c = 0; c < F.Footprints.Num(); ++c)
 			{
+				const FObstacleCapsule& C = F.Footprints[c];
 				if (FMath::Abs(C.Z - Z) < 300.0f && FVector2D::Distance(Here, FMath::ClosestPointOnSegment2D(Here, C.A, C.B)) < HalfWidth + C.Radius)
 				{
 					OutReason = ERammsTrafficYield::Robot;
+					OutObstacle = c;
 					return S;
 				}
 			}
@@ -656,6 +751,10 @@ namespace
 			V.ArrivalTime = -1.0f;
 			V.StoppedAtLine = 0.0f;
 			V.BlockedTime = 0.0f;
+			V.WalkersSince = -1.0f;
+			V.WalkersLast = -1.0f;
+			V.WalkersWait = 0.0f;
+			V.PastStandingWalkers = 0.0f;
 			V.bTeleport = true;
 			V.NetworkVersion = Net.Version;
 			TArray<FOccupant>& Occupants = F.Occupancy[Lane];
@@ -715,6 +814,7 @@ namespace
 		const FRammsTrafficDrivingParams& P = *F.Vehicles[Self].P;
 		const FRammsTrafficVisualFragment& Visual = *F.Vehicles[Self].Visual;
 		FTransform& Transform = *F.Vehicles[Self].Transform;
+		V.BlockerObstacle = INDEX_NONE;
 		if (V.NetworkVersion != Net.Version || !Net.IsValidLane(V.Lane))
 		{
 			// Placed on another network (the ZoneGraph changed): find a new place.
@@ -796,12 +896,50 @@ namespace
 		}
 
 		// Pedestrians and the robot in the way.
+		const double AccelBeforeObstacles = Accel;
 		ERammsTrafficYield ObstacleReason = ERammsTrafficYield::None;
-		const float Obstacle = ScanCorridor(F, V, P, ObstacleReason);
-		if (Obstacle < TNumericLimits<float>::Max())
+		int32 Obstacle = INDEX_NONE;
+		const float ObstacleDistance = ScanCorridor(F, V, P, ObstacleReason, Obstacle);
+		if (ObstacleDistance < TNumericLimits<float>::Max())
 		{
-			const float Gap = Obstacle - P.ObstacleGap;
+			const float Gap = ObstacleDistance - P.ObstacleGap;
 			Constrain(RammsTraffic::IdmFollow(V.Speed, Gap, 0.0, StopIdm), ObstacleReason, FMath::Max(Gap, 0.0f), INDEX_NONE, Gap);
+		}
+		const bool bObstacle = Reason == ERammsTrafficYield::Pedestrian || Reason == ERammsTrafficYield::Robot;
+		V.BlockerObstacle = bObstacle ? Obstacle : INDEX_NONE;
+
+		// Stopping or stopped for walkers and for nothing else (it would drive on but for them): since when, so that
+		// it holds those who come after it (HoldCrossings); a light, a queue or other traffic is not walkers' doing.
+		const bool bForWalkersOnly = Reason == ERammsTrafficYield::Pedestrian && AccelBeforeObstacles > 0.1 * P.MaxAcceleration;
+		if (bForWalkersOnly)
+		{
+			if (V.WalkersSince < 0.0f)
+			{
+				V.WalkersSince = static_cast<float>(F.Now);
+			}
+			V.WalkersLast = static_cast<float>(F.Now);
+			if (V.Speed < 10.0f)
+			{
+				V.WalkersWait += F.Dt;
+			}
+		}
+		else if (V.WalkersSince >= 0.0f && (V.Speed > 100.0f || F.Now - V.WalkersLast > 2.0))
+		{
+			V.WalkersSince = -1.0f;
+			V.WalkersWait = 0.0f;
+		}
+		// Walker deadlock breaker: stood MaxWaitSeconds for nothing but a walker who does not move. Drive on past
+		// standing walkers until this car is well past where that one stands.
+		if (bForWalkersOnly && V.WalkersWait > P.MaxWaitSeconds && F.Pedestrians.IsValidIndex(Obstacle))
+		{
+			const int32 Walker = F.Pedestrians[Obstacle].Walker;
+			if (F.Walkers.IsValidIndex(Walker) && F.Walkers[Walker].Velocity.SizeSquared() < FMath::Square(StandingSpeed))
+			{
+				UE_LOG(LogRammsCrowd, Warning, TEXT("Traffic: %s stood %.0f s for a walker who does not move; it drives on past standing walkers. Walker %s"),
+					*VehicleName(F, Self), V.WalkersWait, *WalkerText(F, Walker, F.Pedestrians[Obstacle].Step));
+				V.PastStandingWalkers = ObstacleDistance + 2.0f * V.HalfLength + 300.0f;
+				V.WalkersWait = 0.0f;
+			}
 		}
 
 		Accel = FMath::Clamp(Accel, -static_cast<double>(P.MaxDeceleration), static_cast<double>(P.MaxAcceleration));
@@ -825,13 +963,20 @@ namespace
 			V.BlockedTime = 0.0f;
 		}
 		V.Distance += static_cast<float>(Travel);
+		V.PastStandingWalkers = FMath::Max(V.PastStandingWalkers - static_cast<float>(Travel), 0.0f);
 		AdvanceLanes(F, V, Self);
 
 		const bool bTrace = Visual.GroundTraceRadius > 0.0f && F.NearestPlayerDistanceSquared(Transform.GetLocation()) < FMath::Square(static_cast<double>(Visual.GroundTraceRadius));
 		ComputePose(F, V, bTrace, Transform);
 	}
 
-	/** The pedestrian lanes this vehicle is over or will cross within CrossingHoldSeconds, if it is going there. */
+	/**
+	 * The street crossings walkers wait at for this vehicle (see CrossingHoldSeconds): those under it, for everyone;
+	 * those ahead, for everyone while it drives on, for those who come after it began to yield while it yields to
+	 * walkers (who was first goes first: the ones already crossing or already at the kerb go before it, and the gate
+	 * keeps waiting anyone already waiting for a car), and for nobody while it stands for anything else (a light, a
+	 * queue, other traffic).
+	 */
 	void HoldCrossings(FTrafficFrame& F, const int32 Self)
 	{
 		const FRammsTrafficNetwork& Net = *F.Net;
@@ -842,37 +987,55 @@ namespace
 			return;
 		}
 		const FRammsTrafficLane& Lane = Net.Lanes[V.Lane];
-		const bool bInside = Lane.Zone != INDEX_NONE;
-		const bool bApproaching = F.ApproachZone(V) != INDEX_NONE;
-		// Driving on, or standing only for walkers already in its way (holding the others lets it go once they are past).
-		// Not a car stopped for a light, a queue or other traffic.
-		const bool bGoing = V.Speed > 50.0f || V.Yield == ERammsTrafficYield::Pedestrian;
-		if (!bGoing)
-		{
-			return;
-		}
 		const float Front = V.Distance + V.HalfLength;
 		const float Back = V.Distance - V.HalfLength;
-		const float Reach = Front + FMath::Clamp(V.Speed * P.CrossingHoldSeconds, 300.0f, 1200.0f);
-		for (const FRammsTrafficCrossingPoint& X : Lane.Crossings)
+		const float Everyone = TNumericLimits<float>::Lowest();
+		auto HoldAlong = [&F, &Net](const int32 LaneIndex, const float From, const float To, const float Since)
 		{
-			if (X.Distance >= Back - 50.0f && X.Distance <= Reach)
+			for (const FRammsTrafficCrossingPoint& X : Net.Lanes[LaneIndex].Crossings)
 			{
-				F.HeldCrossings.Add(X.PedestrianLane);
-			}
-		}
-		// On into the next lane: always out of an intersection or along a road, into one only when let in.
-		if (Net.IsValidLane(V.NextLane) && (bInside || !bApproaching || V.bGranted))
-		{
-			const float Offset = Lane.Length;
-			for (const FRammsTrafficCrossingPoint& X : Net.Lanes[V.NextLane].Crossings)
-			{
-				if (Offset + X.Distance > Reach)
+				if (X.Distance > To)
 				{
 					break;
 				}
-				F.HeldCrossings.Add(X.PedestrianLane);
+				if (X.Distance >= From)
+				{
+					F.Hold(X.PedestrianLane, Since);
+				}
 			}
+		};
+		// On into the next lane: always out of an intersection or along a road, into one only when let in.
+		const bool bInside = Lane.Zone != INDEX_NONE;
+		const bool bApproaching = F.ApproachZone(V) != INDEX_NONE;
+		const bool bOnInto = Net.IsValidLane(V.NextLane) && (bInside || !bApproaching || V.bGranted);
+
+		// Nobody walks through a car, whatever it is doing.
+		HoldAlong(V.Lane, Back - 50.0f, Front + 50.0f, Everyone);
+		if (Net.IsValidLane(V.PrevLane) && Back < 0.0f)
+		{
+			const float PrevLength = Net.Lanes[V.PrevLane].Length;
+			HoldAlong(V.PrevLane, PrevLength + Back - 50.0f, PrevLength, Everyone);
+		}
+		if (bOnInto && Front + 50.0f > Lane.Length)
+		{
+			HoldAlong(V.NextLane, 0.0f, Front + 50.0f - Lane.Length, Everyone);
+		}
+
+		float Since = Everyone;
+		if (V.WalkersSince >= 0.0f)
+		{
+			Since = V.WalkersSince;
+		}
+		else if (V.Speed <= 50.0f)
+		{
+			return;
+		}
+		const float Stopping = V.Speed * V.Speed / (2.0f * FMath::Max(P.ComfortDeceleration, 10.0f));
+		const float Reach = Front + FMath::Clamp(FMath::Max(V.Speed * P.CrossingHoldSeconds, Stopping), 300.0f, 2500.0f);
+		HoldAlong(V.Lane, Back - 50.0f, Reach, Since);
+		if (bOnInto && Reach > Lane.Length)
+		{
+			HoldAlong(V.NextLane, 0.0f, Reach - Lane.Length, Since);
 		}
 	}
 
@@ -901,16 +1064,6 @@ namespace
 	const TCHAR* TurnName(const ERammsTrafficTurn Turn)
 	{
 		return Turn == ERammsTrafficTurn::Left ? TEXT("left") : Turn == ERammsTrafficTurn::Right ? TEXT("right") : TEXT("straight");
-	}
-
-	FString VehicleName(const FTrafficFrame& F, const int32 Index)
-	{
-		if (!F.Vehicles.IsValidIndex(Index))
-		{
-			return TEXT("-");
-		}
-		const ARammsTrafficVehicleActor* Actor = F.Vehicles[Index].Visual->Actor.Get();
-		return Actor != nullptr ? Actor->GetName() : FString::Printf(TEXT("#%d"), Index);
 	}
 
 	FString LaneName(const FTrafficFrame& F, const int32 Lane)
@@ -955,11 +1108,25 @@ namespace
 					V.Entry == ERammsTrafficYield::None ? (V.bGranted ? TEXT("let in") : TEXT("approaching")) : YieldName(V.Entry),
 					*Detail, DistanceToLine(F, V, P));
 			}
-			UE_LOG(LogRammsCrowd, Display, TEXT("  %s at (%.0f, %.0f, %.0f) yaw %.0f: %s d=%.0f/%.0f v=%.1f km/h a=%.2f m/s2 | next %s | limit %s gap %.0f cm by %s | entry %s | granted %d leftWaiting %d blocked %.1f s stopped %.1f s arrival %.1f"),
+			FString By = VehicleName(F, V.Blocker);
+			if (V.Yield == ERammsTrafficYield::Pedestrian && F.Pedestrians.IsValidIndex(V.BlockerObstacle))
+			{
+				const FObstaclePoint& O = F.Pedestrians[V.BlockerObstacle];
+				By = FString::Printf(TEXT("walker %s"), *WalkerText(F, O.Walker, O.Step));
+			}
+			else if (V.Yield == ERammsTrafficYield::Robot && F.Footprints.IsValidIndex(V.BlockerObstacle))
+			{
+				const FObstacleCapsule& C = F.Footprints[V.BlockerObstacle];
+				By = FString::Printf(TEXT("robot footprint %d at (%.0f, %.0f) r %.0f"), V.BlockerObstacle, (C.A.X + C.B.X) * 0.5, (C.A.Y + C.B.Y) * 0.5, C.Radius);
+			}
+			const FString Walkers = V.WalkersSince >= 0.0f || V.PastStandingWalkers > 0.0f
+				? FString::Printf(TEXT(" | for walkers only since t=%.1f, stood %.1f s, past standing walkers %.0f cm"), V.WalkersSince, V.WalkersWait, V.PastStandingWalkers)
+				: FString();
+			UE_LOG(LogRammsCrowd, Display, TEXT("  %s at (%.0f, %.0f, %.0f) yaw %.0f: %s d=%.0f/%.0f v=%.1f km/h a=%.2f m/s2 | next %s | limit %s gap %.0f cm by %s | entry %s | granted %d leftWaiting %d blocked %.1f s stopped %.1f s arrival %.1f%s"),
 				*VehicleName(F, i), Location.X, Location.Y, Location.Z, F.Vehicles[i].Transform->Rotator().Yaw,
 				*LaneName(F, V.Lane), V.Distance, F.Net->Lanes[V.Lane].Length, V.Speed * 0.036f, V.Acceleration * 0.01f,
-				*LaneName(F, V.NextLane), YieldName(V.Yield), V.LimitGap, *VehicleName(F, V.Blocker), *Waits,
-				V.bGranted ? 1 : 0, V.bLeftWaiting ? 1 : 0, V.BlockedTime, V.StoppedAtLine, V.ArrivalTime);
+				*LaneName(F, V.NextLane), YieldName(V.Yield), V.LimitGap, *By, *Waits,
+				V.bGranted ? 1 : 0, V.bLeftWaiting ? 1 : 0, V.BlockedTime, V.StoppedAtLine, V.ArrivalTime, *Walkers);
 		}
 		for (int32 Zone = 0; Zone < F.Claims.Num(); ++Zone)
 		{
@@ -980,6 +1147,40 @@ namespace
 			UE_LOG(LogRammsCrowd, Display, TEXT("  I%d at (%.0f, %.0f) %s: claims%s | approaching%s"), Zone, C.X, C.Y,
 				F.Net->Zones[Zone].bSignalized ? TEXT("signalized") : TEXT("all-way stop"), Claims.IsEmpty() ? TEXT(" none") : *Claims, Approaching.IsEmpty() ? TEXT(" none") : *Approaching);
 		}
+
+		// The street crossings walkers wait at, and the walkers on them who are held or stand still.
+		FString Held;
+		int32 Listed = 0;
+		for (const TPair<FZoneGraphLaneHandle, float>& Pair : F.HeldCrossings)
+		{
+			if (++Listed > 40)
+			{
+				Held += TEXT(" ...");
+				break;
+			}
+			Held += Pair.Value <= TNumericLimits<float>::Lowest() ? FString::Printf(TEXT(" %s:all"), *Pair.Key.ToString()) : FString::Printf(TEXT(" %s:after t=%.1f"), *Pair.Key.ToString(), Pair.Value);
+		}
+		UE_LOG(LogRammsCrowd, Display, TEXT("  held crossings (%d):%s"), F.HeldCrossings.Num(), Held.IsEmpty() ? TEXT(" none") : *Held);
+		int32 OnCrossings = 0, HeldWalkers = 0, Standing = 0;
+		Listed = 0;
+		for (int32 w = 0; w < F.Walkers.Num(); ++w)
+		{
+			const FWalker& W = F.Walkers[w];
+			if (W.RoadAt < 0.0f)
+			{
+				continue;
+			}
+			++OnCrossings;
+			const bool bStanding = W.Velocity.SizeSquared() < FMath::Square(StandingSpeed);
+			HeldWalkers += W.bHeld ? 1 : 0;
+			Standing += bStanding && !W.bHeld ? 1 : 0;
+			if ((W.bHeld || bStanding) && ++Listed <= 40)
+			{
+				UE_LOG(LogRammsCrowd, Display, TEXT("    walker %s"), *WalkerText(F, w, 0));
+			}
+		}
+		UE_LOG(LogRammsCrowd, Display, TEXT("  walkers: %d, %d on street crossings (%d held at the start, %d standing)%s"),
+			F.Walkers.Num(), OnCrossings, HeldWalkers, Standing, Listed > 40 ? TEXT(", first 40 of them listed above") : TEXT(""));
 	}
 
 	/** ramms.Traffic.Debug: what limits the car over it, and its corridor ahead (Level 2). */
@@ -1051,6 +1252,9 @@ void URammsTrafficVehicleProcessor::ConfigureQueries(const TSharedRef<FMassEntit
 	CrowdQuery.AddRequirement<FTransformFragment>(EMassFragmentAccess::ReadOnly);
 	CrowdQuery.AddRequirement<FMassVelocityFragment>(EMassFragmentAccess::ReadOnly, EMassFragmentPresence::Optional);
 	CrowdQuery.AddRequirement<FAgentRadiusFragment>(EMassFragmentAccess::ReadOnly, EMassFragmentPresence::Optional);
+	CrowdQuery.AddRequirement<FMassZoneGraphLaneLocationFragment>(EMassFragmentAccess::ReadOnly, EMassFragmentPresence::Optional);
+	CrowdQuery.AddRequirement<FMassMoveTargetFragment>(EMassFragmentAccess::ReadOnly, EMassFragmentPresence::Optional);
+	CrowdQuery.AddRequirement<FRammsCrossingWaitFragment>(EMassFragmentAccess::ReadOnly, EMassFragmentPresence::Optional);
 }
 
 void URammsTrafficVehicleProcessor::Execute(FMassEntityManager& EntityManager, FMassExecutionContext& Context)
@@ -1104,6 +1308,7 @@ void URammsTrafficVehicleProcessor::Execute(FMassEntityManager& EntityManager, F
 	{
 		return;
 	}
+	F.Predict = Predict;
 
 	// The traffic as it stands: lane occupancy, intersection claims, all-way stop arrivals, approaches.
 	for (int32 i = 0; i < F.Vehicles.Num(); ++i)
@@ -1226,27 +1431,64 @@ void URammsTrafficVehicleProcessor::Execute(FMassEntityManager& EntityManager, F
 		}
 	}
 
-	// Pedestrians, now and where they will be shortly (about to step off the curb).
-	CrowdQuery.ForEachEntityChunk(Context, [&F, Predict](FMassExecutionContext& Ctx)
+	// Pedestrians, now and (walking ones) where they will be shortly (about to step off the curb). Walkers waiting
+	// at the kerb are not in anyone's way: held at a crossing's start, standing at the start of a street crossing
+	// or on any other lane (a crowd at the kerb may spill over it; a car does not wait for them, or a car stopped
+	// for walkers would hold the very walkers it waits for).
+	CrowdQuery.ForEachEntityChunk(Context, [&F, Predict, Net](FMassExecutionContext& Ctx)
 	{
 		const TConstArrayView<FTransformFragment> TransformList = Ctx.GetFragmentView<FTransformFragment>();
 		const TConstArrayView<FMassVelocityFragment> VelocityList = Ctx.GetFragmentView<FMassVelocityFragment>();
 		const TConstArrayView<FAgentRadiusFragment> RadiusList = Ctx.GetFragmentView<FAgentRadiusFragment>();
+		const TConstArrayView<FMassZoneGraphLaneLocationFragment> LaneList = Ctx.GetFragmentView<FMassZoneGraphLaneLocationFragment>();
+		const TConstArrayView<FMassMoveTargetFragment> MoveTargetList = Ctx.GetFragmentView<FMassMoveTargetFragment>();
+		const TConstArrayView<FRammsCrossingWaitFragment> WaitList = Ctx.GetFragmentView<FRammsCrossingWaitFragment>();
 		for (FMassExecutionContext::FEntityIterator It = Ctx.CreateEntityIterator(); It; ++It)
 		{
-			const FVector Location = TransformList[It].GetTransform().GetLocation();
-			const float Radius = RadiusList.IsEmpty() ? 35.0f : RadiusList[It].Radius;
-			const FVector2D Velocity = VelocityList.IsEmpty() ? FVector2D::ZeroVector : FVector2D(VelocityList[It].Value);
-			const int32 Steps = Velocity.IsNearlyZero(1.0) ? 0 : 2;
+			FWalker W;
+			W.Entity = Ctx.GetEntity(It);
+			W.Location = TransformList[It].GetTransform().GetLocation();
+			W.Radius = RadiusList.IsEmpty() ? 35.0f : RadiusList[It].Radius;
+			W.Velocity = VelocityList.IsEmpty() ? FVector2D::ZeroVector : FVector2D(VelocityList[It].Value);
+			if (!LaneList.IsEmpty())
+			{
+				W.Lane = LaneList[It].LaneHandle;
+				W.LaneDistance = LaneList[It].DistanceAlongLane;
+				W.LaneLength = LaneList[It].LaneLength;
+			}
+			if (!MoveTargetList.IsEmpty())
+			{
+				W.DesiredSpeed = MoveTargetList[It].DesiredSpeed.Get();
+				W.Action = MoveTargetList[It].GetCurrentAction();
+			}
+			if (!WaitList.IsEmpty())
+			{
+				W.bHeld = WaitList[It].bHolding;
+				W.LaneSince = WaitList[It].LaneSince;
+			}
+			if (const float* RoadAt = W.Lane.IsValid() ? Net->StreetCrossings.Find(W.Lane) : nullptr)
+			{
+				W.RoadAt = *RoadAt;
+			}
+			const bool bStanding = W.Velocity.SizeSquared() < FMath::Square(StandingSpeed);
+			W.bWaiting = W.bHeld || (W.Lane.IsValid() && bStanding && (W.RoadAt < 0.0f || W.LaneDistance <= URammsCrossingGateProcessor::HoldDistanceCm + 40.0f));
+			const int32 Walker = F.Walkers.Add(W);
+			F.MaxPedestrianRadius = FMath::Max(F.MaxPedestrianRadius, W.Radius);
+			if (W.bWaiting)
+			{
+				continue;
+			}
+			const int32 Steps = W.Velocity.SizeSquared() > FMath::Square(MovingSpeed) ? 2 : 0;
 			for (int32 Step = 0; Step <= Steps; ++Step)
 			{
 				FObstaclePoint Point;
-				Point.Position = FVector2D(Location) + Velocity * (Predict * Step / FMath::Max(Steps, 1));
-				Point.Radius = Radius;
-				Point.Z = static_cast<float>(Location.Z);
+				Point.Position = FVector2D(W.Location) + W.Velocity * (Predict * Step / FMath::Max(Steps, 1));
+				Point.Radius = W.Radius;
+				Point.Z = static_cast<float>(W.Location.Z);
+				Point.Walker = Walker;
+				Point.Step = static_cast<uint8>(Step);
 				F.PedestrianGrid.Add(F.Pedestrians.Add(Point), Point.Position);
 			}
-			F.MaxPedestrianRadius = FMath::Max(F.MaxPedestrianRadius, Radius);
 		}
 	});
 

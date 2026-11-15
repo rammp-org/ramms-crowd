@@ -62,6 +62,9 @@ struct RAMMSCROWD_API FRammsTrafficNetwork
 	TArray<FRammsTrafficLane> Lanes;
 	TArray<FRammsTrafficZone> Zones;
 	TMap<FZoneGraphLaneHandle, int32> LaneByHandle;
+	/** Pedestrian lanes that cross a vehicle lane (street crossings), each with the distance along it to the
+	 *  first vehicle lane centre it crosses, cm. */
+	TMap<FZoneGraphLaneHandle, float> StreetCrossings;
 	int32 Version = 0;
 
 	bool IsEmpty() const { return Lanes.Num() == 0; }
@@ -103,11 +106,23 @@ public:
 	/** Network rebuilds so far (vehicles holding an older version re-place themselves). */
 	int32 GetNetworkVersion() const { return Network.Version; }
 
-	/** Pedestrian lanes a vehicle is over or about to cross (set by the traffic each frame): URammsCrossingGateProcessor
-	 *  holds walkers at their start, so nobody steps in front of a car clearing the intersection. */
-	void SetHeldCrossings(TSet<FZoneGraphLaneHandle>&& InHeld) { HeldCrossings = MoveTemp(InHeld); }
-	bool IsCrossingHeld(const FZoneGraphLaneHandle& Lane) const { return HeldCrossings.Contains(Lane); }
+	/**
+	 * Pedestrian lanes a vehicle is over or about to cross (set by the traffic each frame), each with a world time:
+	 * URammsCrossingGateProcessor holds at its start a walker who came onto the lane at or after that time, and keeps
+	 * holding one it already holds. A car driving on, or standing over a crossing, holds everyone (the lowest float);
+	 * a car yielding to walkers holds just those who come after it began to (who was first goes first).
+	 */
+	void SetHeldCrossings(TMap<FZoneGraphLaneHandle, float>&& InHeld) { HeldCrossings = MoveTemp(InHeld); }
+	bool IsCrossingHeld(const FZoneGraphLaneHandle& Lane, const float CameOnto) const
+	{
+		const float* Since = HeldCrossings.Find(Lane);
+		return Since != nullptr && CameOnto >= *Since;
+	}
+	const float* FindCrossingHold(const FZoneGraphLaneHandle& Lane) const { return HeldCrossings.Find(Lane); }
 	int32 GetHeldCrossingCount() const { return HeldCrossings.Num(); }
+
+	/** Whether a pedestrian lane crosses a vehicle lane (a street crossing). False until the network is built (without traffic, never). */
+	bool IsStreetCrossing(const FZoneGraphLaneHandle& Lane) const { return Network.StreetCrossings.Contains(Lane); }
 
 	/** ramms.Traffic.Dump: requests are counted globally (any world) and served by the next traffic frame. */
 	static void RequestDump();
@@ -118,7 +133,7 @@ private:
 	void BuildNetwork();
 
 	FRammsTrafficNetwork Network;
-	TSet<FZoneGraphLaneHandle> HeldCrossings;
+	TMap<FZoneGraphLaneHandle, float> HeldCrossings;
 	bool bNetworkDirty = true;
 	bool bWarnedNoLanes = false;
 	TWeakObjectPtr<ARammsTrafficSignalClock> SignalClock;

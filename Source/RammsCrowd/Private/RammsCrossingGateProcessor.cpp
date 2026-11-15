@@ -49,8 +49,9 @@ void URammsCrossingGateProcessor::Execute(FMassEntityManager& EntityManager, FMa
 	// Crossings a traffic vehicle is over or about to cross (none without traffic).
 	const URammsTrafficSubsystem* Traffic = UWorld::GetSubsystem<URammsTrafficSubsystem>(World);
 	const URammsTrafficSubsystem* Held = Traffic != nullptr && Traffic->GetHeldCrossingCount() > 0 ? Traffic : nullptr;
+	const float Now = static_cast<float>(World->GetTimeSeconds());
 
-	EntityQuery.ForEachEntityChunk(Context, [Crowd, ZoneGraph, CrossingTag, Held](FMassExecutionContext& Context)
+	EntityQuery.ForEachEntityChunk(Context, [Crowd, ZoneGraph, CrossingTag, Held, Now](FMassExecutionContext& Context)
 	{
 		const TConstArrayView<FMassZoneGraphLaneLocationFragment> LaneList = Context.GetFragmentView<FMassZoneGraphLaneLocationFragment>();
 		const TArrayView<FMassMoveTargetFragment> MoveTargetList = Context.GetMutableFragmentView<FMassMoveTargetFragment>();
@@ -58,6 +59,13 @@ void URammsCrossingGateProcessor::Execute(FMassEntityManager& EntityManager, FMa
 		for (FMassExecutionContext::FEntityIterator EntityIt = Context.CreateEntityIterator(); EntityIt; ++EntityIt)
 		{
 			const FMassZoneGraphLaneLocationFragment& Location = LaneList[EntityIt];
+			FMassMoveTargetFragment& MoveTarget = MoveTargetList[EntityIt];
+			FRammsCrossingWaitFragment& Wait = WaitList[EntityIt];
+			if (Wait.Lane != Location.LaneHandle)
+			{
+				Wait.Lane = Location.LaneHandle;
+				Wait.LaneSince = Now;
+			}
 			bool bHold = false;
 			if (Location.LaneHandle.IsValid() && Location.DistanceAlongLane <= HoldDistanceCm)
 			{
@@ -66,12 +74,16 @@ void URammsCrossingGateProcessor::Execute(FMassEntityManager& EntityManager, FMa
 				{
 					bHold = Crowd->GetLaneState(Location.LaneHandle) == ECrowdLaneState::Closed;
 				}
-				// Nobody steps in front of a car that is clearing the intersection or driving over the crossing.
-				bHold = bHold || (Held != nullptr && Held->IsCrossingHeld(Location.LaneHandle));
+				// Nobody steps in front of a car that is clearing the intersection or driving over the crossing, nor in
+				// front of one that began to yield to other walkers before they came; and whoever waits for a car
+				// keeps waiting while any car holds the crossing (the car was there first).
+				if (Held != nullptr && !bHold)
+				{
+					const float* Since = Held->FindCrossingHold(Location.LaneHandle);
+					bHold = Since != nullptr && (Wait.LaneSince >= *Since || Wait.bHolding);
+				}
 			}
 
-			FMassMoveTargetFragment& MoveTarget = MoveTargetList[EntityIt];
-			FRammsCrossingWaitFragment& Wait = WaitList[EntityIt];
 			if (bHold)
 			{
 				// The StateTree may have just asked for a new path at walking speed: remember it, then stand.

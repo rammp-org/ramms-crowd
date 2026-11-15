@@ -37,8 +37,8 @@ namespace
 		return Best;
 	}
 
-	/** Where segment A0-A1 crosses B0-B1 (2D), as a fraction of A; false when they do not cross. */
-	bool SegmentsCross2D(const FVector2D& A0, const FVector2D& A1, const FVector2D& B0, const FVector2D& B1, double& OutT)
+	/** Where segment A0-A1 crosses B0-B1 (2D), as fractions of A and of B; false when they do not cross. */
+	bool SegmentsCross2D(const FVector2D& A0, const FVector2D& A1, const FVector2D& B0, const FVector2D& B1, double& OutT, double& OutU)
 	{
 		const FVector2D R = A1 - A0;
 		const FVector2D S = B1 - B0;
@@ -51,6 +51,7 @@ namespace
 		const double T = (Q.X * S.Y - Q.Y * S.X) / Den;
 		const double U = (Q.X * R.Y - Q.Y * R.X) / Den;
 		OutT = T;
+		OutU = U;
 		return T >= 0.0 && T <= 1.0 && U >= 0.0 && U <= 1.0;
 	}
 
@@ -378,11 +379,16 @@ void URammsTrafficSubsystem::BuildNetwork()
 					const FVector2D A1(Storage->LanePoints[i + 1]);
 					for (int32 j = PedestrianData.PointsBegin; j + 1 < PedestrianData.PointsEnd; ++j)
 					{
-						double T = 0.0;
-						if (SegmentsCross2D(A0, A1, FVector2D(Pedestrian.Storage->LanePoints[j]), FVector2D(Pedestrian.Storage->LanePoints[j + 1]), T))
+						double T = 0.0, U = 0.0;
+						if (SegmentsCross2D(A0, A1, FVector2D(Pedestrian.Storage->LanePoints[j]), FVector2D(Pedestrian.Storage->LanePoints[j + 1]), T, U))
 						{
 							const float Along = Storage->LanePointProgressions[i] + static_cast<float>(T) * (Storage->LanePointProgressions[i + 1] - Storage->LanePointProgressions[i]);
 							Lane.Crossings.Add(FRammsTrafficCrossingPoint{ Pedestrian.Handle, Along });
+							// How far along the pedestrian lane it meets its first vehicle lane: where its road begins.
+							const TArray<float>& Progressions = Pedestrian.Storage->LanePointProgressions;
+							const float PedestrianAlong = Progressions[j] + static_cast<float>(U) * (Progressions[j + 1] - Progressions[j]) - Progressions[PedestrianData.PointsBegin];
+							float& First = Network.StreetCrossings.FindOrAdd(Pedestrian.Handle, PedestrianAlong);
+							First = FMath::Min(First, PedestrianAlong);
 							++CrossingPoints;
 							bFound = true;
 							break;
@@ -411,8 +417,8 @@ void URammsTrafficSubsystem::BuildNetwork()
 	}
 	if (!Network.IsEmpty())
 	{
-		UE_LOG(LogRammsCrowd, Display, TEXT("Traffic network v%d: %d vehicle lanes, %d intersections (%d signalized), %d lane conflicts, %d dead ends, %d pedestrian crossing points."),
-			Network.Version, Network.Lanes.Num(), Network.Zones.Num(), Signalized, Conflicts, DeadEnds, CrossingPoints);
+		UE_LOG(LogRammsCrowd, Display, TEXT("Traffic network v%d: %d vehicle lanes, %d intersections (%d signalized), %d lane conflicts, %d dead ends, %d pedestrian crossing points (%d street-crossing lanes)."),
+			Network.Version, Network.Lanes.Num(), Network.Zones.Num(), Signalized, Conflicts, DeadEnds, CrossingPoints, Network.StreetCrossings.Num());
 		if (DeadEnds > 0)
 		{
 			UE_LOG(LogRammsCrowd, Warning, TEXT("Traffic: %d vehicle lanes lead nowhere (a road and an intersection that do not meet); cars reaching one start again elsewhere. 'log LogRammsCrowd Verbose' lists them."), DeadEnds);

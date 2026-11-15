@@ -11,9 +11,10 @@
  *
  *  1. Gathers the frame's state: a per-lane occupancy index (vehicles sorted by distance), each controlled
  *     intersection's claims (vehicles in it, or let in), arrivals at all-way stops and vehicles approaching it;
- *     the crowd's pedestrians (now and PredictSeconds ahead, on a hash grid) and the robot footprints (the
- *     player avatar entities URammsRobotClearanceProcessor uses, or the player pawns' bounds when there is no
- *     avatar entity).
+ *     the crowd's pedestrians (now and, walking ones, PredictSeconds ahead, on a hash grid; not those waiting at
+ *     the kerb: held at a crossing's start, standing at the start of a street crossing or on any other lane) and
+ *     the robot footprints (the player avatar entities URammsRobotClearanceProcessor uses, or the player pawns'
+ *     bounds when there is no avatar entity).
  *  2. Moves each vehicle along its lanes: acceleration is the lowest of the IDM free-road term, IDM behind the
  *     leader (on its lane, then its next two lanes), the turn speed, the stop line when it may not enter the
  *     intersection ahead, and IDM behind the nearest pedestrian or robot in its corridor (its path ahead, half
@@ -43,9 +44,18 @@
  * have separated. Walkers are held at the start of any crossing a car is over or about to cross
  * (URammsTrafficSubsystem::SetHeldCrossings), so a car clearing the intersection is not trapped by the next Walk.
  *
+ * Cars and walkers at a crossing: who was first goes first. A car driving on holds everyone at the kerb (within
+ * CrossingHoldSeconds, and at least its comfortable stopping distance); walkers already crossing are stopped for.
+ * A car yielding to nothing but walkers holds those who step up after it began to (and the gate keeps waiting
+ * anyone already waiting for a car), so it goes once the ones already crossing are across; a car stopped for
+ * anything else holds nobody but those it stands over. Cars never wait for a walker held at the kerb. A car that has stood MaxWaitSeconds for a walker who does not move drives on past
+ * standing walkers (a warning names the walker).
+ *
  * ramms.Traffic.Debug 1 draws each vehicle's speed and what limits it; ramms.Traffic.Dump logs every vehicle (lane,
- * distance, speed, next lane and turn, the limiting term and the vehicle behind it, the entry decision and who it
- * waits for, claim and stop state) and every intersection's claims and approaches; ramms.Traffic.DumpInterval N
+ * distance, speed, next lane and turn, the limiting term and the vehicle or walker behind it, the entry decision and
+ * who it waits for, claim, stop and walker-wait state), every intersection's claims and approaches, the held
+ * crossings, and the walkers on street crossings that are held or stand still (entity, position, speed, lane and
+ * distance along it, signal and hold state, desired speed and movement action); ramms.Traffic.DumpInterval N
  * repeats the dump every N s.
  */
 UCLASS()

@@ -239,12 +239,16 @@ struct RAMMSCROWD_API FRammsTrafficDrivingParams : public FMassConstSharedFragme
 
 	/** Deadlock breaker: a vehicle that has stood this long in all at its stop line held by other vehicles' rules
 	 *  (claims, arrival order, the box, oncoming traffic; time at a red light neither counts nor resets it) enters
-	 *  as soon as no vehicle on a conflicting lane is physically in the intersection. */
+	 *  as soon as no vehicle on a conflicting lane is physically in the intersection. A vehicle that has stood this
+	 *  long for nothing but a walker who does not move drives on past standing walkers (logged as a warning). */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Ramms|Traffic|Rules", meta = (ClampMin = "1.0", Units = "s"))
 	float MaxWaitSeconds = 20.0f;
 
 	/** Pedestrians do not step onto a crossing a vehicle will be over within this many seconds (it is in or let into
-	 *  the intersection, or driving on), nor onto one under a vehicle; at least 3 m, at most 12 m ahead of it. */
+	 *  the intersection, or driving on), nor onto one under a vehicle: at least 3 m ahead of it and at least as far as
+	 *  it needs to stop at ComfortDeceleration, at most 25 m. A vehicle yielding to walkers holds only those who come
+	 *  after it began to (and those already waiting for a car); one stopped for anything else holds nobody but those
+	 *  it is standing over. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Ramms|Traffic|Yield", meta = (ClampMin = "0.0", Units = "s"))
 	float CrossingHoldSeconds = 2.0f;
 
@@ -312,6 +316,15 @@ struct RAMMSCROWD_API FRammsTrafficVehicleFragment : public FMassFragment
 	int32 Blocker = INDEX_NONE;
 	int32 EntryBlocker = INDEX_NONE;
 	float LimitGap = 0.0f;
+	/** When what limits it is a walker or the robot: this frame's walker obstacle point or robot footprint index. */
+	int32 BlockerObstacle = INDEX_NONE;
+	/** Stopped for walkers and nothing else: since when (world time; -1 = not), when last, and seconds stood. */
+	float WalkersSince = -1.0f;
+	float WalkersLast = -1.0f;
+	float WalkersWait = 0.0f;
+	/** After MaxWaitSeconds stood for a walker who does not move: how much further it drives past walkers standing
+	 *  in its way, cm (the walker deadlock breaker). */
+	float PastStandingWalkers = 0.0f;
 	FVector Velocity = FVector::ZeroVector;
 };
 

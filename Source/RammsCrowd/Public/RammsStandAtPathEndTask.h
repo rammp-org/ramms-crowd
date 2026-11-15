@@ -35,6 +35,8 @@ struct FRammsStandAtPathEndTaskInstanceData
  * back, which reads as sliding and shuffling. With Stand at the end, Mass brakes
  * into the goal and the stop animation has a stop to match. Use it between the
  * target-finding task and the path follow task of a state that stands next.
+ * A walk that ends on a street crossing (URammsTrafficSubsystem::IsStreetCrossing:
+ * levels with traffic) never stands: nobody stops in the road.
  */
 USTRUCT(meta = (DisplayName = "RAMMS Stand At Path End"))
 struct RAMMSCROWD_API FRammsStandAtPathEndTask : public FMassStateTreeTaskBase

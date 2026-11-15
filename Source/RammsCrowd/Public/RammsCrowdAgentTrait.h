@@ -6,6 +6,7 @@
 #include "MassEntityTraitBase.h"
 #include "MassEntityTypes.h"
 #include "RammsCrowdTypes.h"
+#include "ZoneGraphTypes.h"
 #include "RammsCrowdAgentTrait.generated.h"
 
 /** Marks entities spawned as RAMMS crowd members; filter tag for project processors. */
@@ -44,7 +45,8 @@ struct RAMMSCROWD_API FRammsRobotContactFragment : public FMassFragment
 
 /**
  * A crowd member held at the start of a closed street crossing (URammsCrossingGateProcessor): the walking
- * speed it had, given back when the crossing opens.
+ * speed it had, given back when the crossing opens; and when it came onto the lane it is on (a car stopped for
+ * walkers lets those who were there first go first).
  */
 USTRUCT()
 struct RAMMSCROWD_API FRammsCrossingWaitFragment : public FMassFragment
@@ -56,6 +58,13 @@ struct RAMMSCROWD_API FRammsCrossingWaitFragment : public FMassFragment
 
 	UPROPERTY()
 	bool bHolding = false;
+
+	/** The ZoneGraph lane it was on last frame, and the world time it came onto it. */
+	UPROPERTY()
+	FZoneGraphLaneHandle Lane;
+
+	UPROPERTY()
+	float LaneSince = 0.0f;
 };
 
 /** Per-archetype crowd profile data shared by all entities of one kind. */
