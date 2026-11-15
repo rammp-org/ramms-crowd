@@ -96,9 +96,10 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Crowd", meta = (ClampMin = "0.01"))
 	float DefaultCountScale = 1.0f;
 
-	/** Navigation/avoidance footprint radius, cm. Mirror into the entity config's RAMMS Crowd Agent trait. */
+	/** Navigation/avoidance footprint radius, cm. Mirror into the entity config's RAMMS Crowd Agent trait (25 cm: walkers
+	 *  on opposite lanes 60 cm apart pass each other). */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Crowd|Movement", meta = (ClampMin = "1.0"))
-	float AgentRadiusCm = 35.0f;
+	float AgentRadiusCm = 25.0f;
 
 	/** Desired walk speed range, cm/s. Mirror into the movement trait's desired-speed variations. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Crowd|Movement")

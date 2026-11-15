@@ -112,9 +112,11 @@ class RAMMSCROWD_API URammsCrowdAgentTrait : public UMassEntityTraitBase
 	GENERATED_BODY()
 
 public:
-	/** Avoidance/navigation footprint radius, cm. */
+	/** Avoidance/navigation footprint radius, cm. 25 cm (a body is about 45 cm across the shoulders): two walkers on
+	 *  the two opposite 60 cm lanes of a sidewalk or crossing (centres 60 cm apart) pass each other; at 35 cm they met
+	 *  head-on and stood in each other's way, stuck mid-crossing for tens of seconds. */
 	UPROPERTY(EditAnywhere, Category = "Ramms|Crowd", meta = (ClampMin = "1.0"))
-	float AgentRadiusCm = 35.0f;
+	float AgentRadiusCm = 25.0f;
 
 	UPROPERTY(EditAnywhere, Category = "Ramms|Crowd")
 	FRammsCrowdProfileParameters ProfileParameters;
