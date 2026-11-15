@@ -31,4 +31,9 @@ public:
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Box Generator")
 	bool bRandomizeYaw = true;
+
+	/** No point whose nearest ZoneGraph lane carries the tag of this name (the traffic's vehicle lanes): walkers
+	 *  placed there would snap onto that lane. None: no lane is avoided. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Box Generator")
+	FName ExcludeLaneTagName = FName(TEXT("Vehicle"));
 };

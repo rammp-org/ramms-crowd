@@ -2,6 +2,8 @@
 
 #include "RammsStandAtPathEndTask.h"
 
+#include "Engine/World.h"
+#include "RammsTrafficSubsystem.h"
 #include "StateTreeExecutionContext.h"
 #include "Tasks/MassZoneGraphPathFollowTask.h"
 
@@ -10,6 +12,16 @@ EStateTreeRunStatus FRammsStandAtPathEndTask::EnterState(FStateTreeExecutionCont
 	FInstanceDataType& InstanceData = Context.GetInstanceData(*this);
 	InstanceData.bStandAtEnd = InstanceData.StandChance >= 1.0f || FMath::FRand() < InstanceData.StandChance;
 	FMassZoneGraphTargetLocation* Target = InstanceData.TargetLocation.GetMutablePtr<FMassZoneGraphTargetLocation>(Context);
+	// Nobody stops in the street: a walk that ends on a street crossing (a pedestrian lane over a traffic lane) walks
+	// on. Without traffic there are none. (Mass may run this on a worker thread: IsStreetCrossing is thread-safe.)
+	if (InstanceData.bStandAtEnd && Target != nullptr && Target->LaneHandle.IsValid())
+	{
+		const URammsTrafficSubsystem* Traffic = UWorld::GetSubsystem<URammsTrafficSubsystem>(Context.GetWorld());
+		if (Traffic != nullptr && Traffic->IsStreetCrossing(Target->LaneHandle))
+		{
+			InstanceData.bStandAtEnd = false;
+		}
+	}
 	if (Target != nullptr && InstanceData.bStandAtEnd)
 	{
 		Target->EndOfPathIntent = EMassMovementAction::Stand;

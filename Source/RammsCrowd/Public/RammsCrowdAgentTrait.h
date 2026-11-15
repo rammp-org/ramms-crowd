@@ -6,6 +6,7 @@
 #include "MassEntityTraitBase.h"
 #include "MassEntityTypes.h"
 #include "RammsCrowdTypes.h"
+#include "ZoneGraphTypes.h"
 #include "RammsCrowdAgentTrait.generated.h"
 
 /** Marks entities spawned as RAMMS crowd members; filter tag for project processors. */
@@ -40,6 +41,35 @@ struct RAMMSCROWD_API FRammsRobotContactFragment : public FMassFragment
 	/** Side the agent has committed to passing the robot on: +1 its right, -1 its left, 0 no pass planned. */
 	UPROPERTY()
 	int8 PassSide = 0;
+};
+
+/**
+ * A crowd member held at the start of a closed street crossing (URammsCrossingGateProcessor): the walking
+ * speed it had, given back when the crossing opens; and when it came onto the lane it is on (a car stopped for
+ * walkers lets those who were there first go first).
+ */
+USTRUCT()
+struct RAMMSCROWD_API FRammsCrossingWaitFragment : public FMassFragment
+{
+	GENERATED_BODY()
+
+	UPROPERTY()
+	float HeldSpeed = 0.0f;
+
+	UPROPERTY()
+	bool bHolding = false;
+
+	/** Held for a car (its crossing open): it keeps waiting while any car holds the crossing. One held for the signal
+	 *  goes on Walk unless a car that was there first holds it. */
+	UPROPERTY()
+	bool bHeldForCar = false;
+
+	/** The ZoneGraph lane it was on last frame, and the world time it came onto it. */
+	UPROPERTY()
+	FZoneGraphLaneHandle Lane;
+
+	UPROPERTY()
+	float LaneSince = 0.0f;
 };
 
 /** Per-archetype crowd profile data shared by all entities of one kind. */
@@ -87,9 +117,11 @@ class RAMMSCROWD_API URammsCrowdAgentTrait : public UMassEntityTraitBase
 	GENERATED_BODY()
 
 public:
-	/** Avoidance/navigation footprint radius, cm. */
+	/** Avoidance/navigation footprint radius, cm. 25 cm (a body is about 45 cm across the shoulders): two walkers on
+	 *  the two opposite 60 cm lanes of a sidewalk or crossing (centres 60 cm apart) pass each other; at 35 cm they met
+	 *  head-on and stood in each other's way, stuck mid-crossing for tens of seconds. */
 	UPROPERTY(EditAnywhere, Category = "Ramms|Crowd", meta = (ClampMin = "1.0"))
-	float AgentRadiusCm = 35.0f;
+	float AgentRadiusCm = 25.0f;
 
 	UPROPERTY(EditAnywhere, Category = "Ramms|Crowd")
 	FRammsCrowdProfileParameters ProfileParameters;

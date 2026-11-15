@@ -275,6 +275,7 @@ UMassEntitySpawnDataGeneratorBase* ARammsCrowdSpawner::BuildSpawnGenerator() con
 			Generator->MinGapCm = ZoneGraphSpawnSettings.MinGapCm;
 			Generator->MaxGapCm = ZoneGraphSpawnSettings.MaxGapCm;
 			Generator->bAlignToLaneDirection = ZoneGraphSpawnSettings.bAlignToLaneDirection;
+			Generator->ExcludeLaneTagName = ZoneGraphSpawnSettings.ExcludeLaneTagName;
 			return Generator;
 		}
 
@@ -288,6 +289,7 @@ UMassEntitySpawnDataGeneratorBase* ARammsCrowdSpawner::BuildSpawnGenerator() con
 			Generator->MaxPlacementAttemptsPerEntity = BoxSpawnSettings.MaxPlacementAttemptsPerEntity;
 			Generator->bAlignToOwnerRotation = BoxSpawnSettings.bAlignToOwnerRotation;
 			Generator->bRandomizeYaw = BoxSpawnSettings.bRandomizeYaw;
+			Generator->ExcludeLaneTagName = BoxSpawnSettings.ExcludeLaneTagName;
 			return Generator;
 		}
 	}
