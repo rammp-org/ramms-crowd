@@ -206,6 +206,71 @@ bool FRammsTrafficSignalCycleTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("defaults: RedY on"), Defaults.FindRef(FName(TEXT("RedY"))), 1.0f);
 	TestEqual(TEXT("defaults: HandX on"), Defaults.FindRef(FName(TEXT("HandX"))), 1.0f);
 	TestEqual(TEXT("defaults: WalkY on"), Defaults.FindRef(FName(TEXT("WalkY"))), 1.0f);
+
+	// How long each axis' walkers see Walk; none when the clearance takes up the whole green (the clock warns).
+	TestEqual(TEXT("walk: green less clearance"), Timing.GetWalkSeconds(0), 14.0, 0.001);
+	TestEqual(TEXT("walk: Y too"), Timing.GetWalkSeconds(1), 9.0, 0.001);
+	FRammsSignalTiming NoWalk = Timing;
+	NoWalk.PedestrianClearanceSeconds = 30.0f;
+	TestEqual(TEXT("walk: clearance longer than the green: never"), NoWalk.GetWalkSeconds(0), 0.0, 0.001);
+	bool bAnyWalk = false;
+	for (double T = 0.0; T < NoWalk.GetCycleSeconds(); T += 0.1)
+	{
+		bAnyWalk |= FRammsSignalCycle::Evaluate(NoWalk, T).WalkAlongX == ERammsWalkSignal::Walk;
+	}
+	TestFalse(TEXT("walk: and the cycle agrees"), bAnyWalk);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRammsTrafficRulesTest, "Ramms.Crowd.Traffic.Rules",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FRammsTrafficRulesTest::RunTest(const FString& Parameters)
+{
+	using namespace RammsTraffic;
+
+	// Committed: over the line, or too fast to stop in what is left of it.
+	TestTrue(TEXT("committed: over the line"), IsCommitted(0.0, -5.0, 800.0));
+	TestTrue(TEXT("committed: 10 m/s, 5 m out (needs 6.25 m)"), IsCommitted(1000.0, 500.0, 800.0));
+	TestFalse(TEXT("not committed: 10 m/s, 7 m out"), IsCommitted(1000.0, 700.0, 800.0));
+	TestFalse(TEXT("not committed: standing at the line"), IsCommitted(0.0, 0.0, 800.0));
+
+	// Turn slowdown: only once braking for the turn takes half the comfortable deceleration.
+	TestTrue(TEXT("turn: far away, no braking yet"), TurnSlowdown(1000.0, 450.0, 10000.0, 250.0) > 1.0e10);
+	TestTrue(TEXT("turn: close, it brakes"), TurnSlowdown(1000.0, 450.0, 1500.0, 250.0) < -125.0);
+	TestTrue(TEXT("turn: already slow enough"), TurnSlowdown(400.0, 450.0, 500.0, 250.0) > 1.0e10);
+
+	// In the way: physically in the path always; on the carriageway within the margin unless waiting; beside the lane never.
+	TestTrue(TEXT("way: in the path"), IsInTheWay(100.0, 25.0, 95.0, 160.0, 60.0, true));
+	TestFalse(TEXT("way: waiting beside the path"), IsInTheWay(140.0, 25.0, 95.0, 160.0, 60.0, true));
+	TestTrue(TEXT("way: walking beside the path, on the lane"), IsInTheWay(140.0, 25.0, 95.0, 160.0, 60.0, false));
+	TestFalse(TEXT("way: robot beside a narrow lane (off the carriageway)"), IsInTheWay(200.0, 60.0, 95.0, 125.0, 60.0, false));
+	TestTrue(TEXT("way: robot reaching onto it"), IsInTheWay(170.0, 60.0, 95.0, 125.0, 60.0, false));
+	TestTrue(TEXT("way: a car wider than its lane still hits what is in its path"), IsInTheWay(140.0, 60.0, 95.0, 50.0, 60.0, false));
+
+	// Waiting walkers.
+	TestTrue(TEXT("waiting: held"), IsWalkerWaiting(true, true, false, true, 300.0f, 200.0f, 520.0f));
+	TestFalse(TEXT("waiting: walking"), IsWalkerWaiting(false, true, false, false, 0.0f, 0.0f, 0.0f));
+	TestTrue(TEXT("waiting: standing on a sidewalk"), IsWalkerWaiting(false, true, true, false, 0.0f, 0.0f, 0.0f));
+	TestFalse(TEXT("waiting: standing with no lane"), IsWalkerWaiting(false, false, true, false, 0.0f, 0.0f, 0.0f));
+	TestTrue(TEXT("waiting: standing at its crossing's start"), IsWalkerWaiting(false, true, true, true, 150.0f, 200.0f, 520.0f));
+	TestFalse(TEXT("waiting: standing in the road"), IsWalkerWaiting(false, true, true, true, 300.0f, 200.0f, 520.0f));
+	TestTrue(TEXT("waiting: standing past the last lane (finishing)"), IsWalkerWaiting(false, true, true, true, 560.0f, 200.0f, 520.0f));
+
+	// Driving parameters set out of range (from Python or Blueprint) come back inside it.
+	FRammsTrafficDrivingParams Bad;
+	Bad.ComfortDeceleration = 0.0f;
+	Bad.MaxDeceleration = -5.0f;
+	Bad.TimeHeadway = 0.0f;
+	Bad.SpeedVariation = 3.0f;
+	Bad.MaxWaitSeconds = 0.0f;
+	const FRammsTrafficDrivingParams Good = Bad.Sanitized();
+	TestEqual(TEXT("sanitized: comfortable deceleration"), Good.ComfortDeceleration, 10.0f);
+	TestEqual(TEXT("sanitized: maximum deceleration"), Good.MaxDeceleration, 100.0f);
+	TestEqual(TEXT("sanitized: headway"), Good.TimeHeadway, 0.1f);
+	TestEqual(TEXT("sanitized: speed variation"), Good.SpeedVariation, 0.5f);
+	TestEqual(TEXT("sanitized: wait"), Good.MaxWaitSeconds, 1.0f);
+	TestEqual(TEXT("sanitized: in-range values kept"), Good.SpeedLimit, Bad.SpeedLimit);
 	return true;
 }
 
