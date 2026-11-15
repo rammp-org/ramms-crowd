@@ -289,6 +289,7 @@ UMassEntitySpawnDataGeneratorBase* ARammsCrowdSpawner::BuildSpawnGenerator() con
 			Generator->MaxPlacementAttemptsPerEntity = BoxSpawnSettings.MaxPlacementAttemptsPerEntity;
 			Generator->bAlignToOwnerRotation = BoxSpawnSettings.bAlignToOwnerRotation;
 			Generator->bRandomizeYaw = BoxSpawnSettings.bRandomizeYaw;
+			Generator->ExcludeLaneTagName = BoxSpawnSettings.ExcludeLaneTagName;
 			return Generator;
 		}
 	}

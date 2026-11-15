@@ -2,12 +2,29 @@
 
 #include "RammsCrowdBoxSpawnPointsGenerator.h"
 
+#include "Engine/World.h"
 #include "GameFramework/Actor.h"
 #include "MassSpawnLocationProcessor.h"
 #include "RammsCrowdLog.h"
+#include "ZoneGraphSettings.h"
+#include "ZoneGraphSubsystem.h"
 
 namespace
 {
+	/** Whether the ZoneGraph lane nearest Point (as the crowd's lane location initializer would pick it) carries Tag. */
+	static bool IsNearestLaneTagged(const UZoneGraphSubsystem* ZoneGraph, const FZoneGraphTag Tag, const FVector& Point)
+	{
+		if (ZoneGraph == nullptr || !Tag.IsValid())
+		{
+			return false;
+		}
+		FZoneGraphLaneLocation Location;
+		float DistanceSquared = 0.0f;
+		FZoneGraphTagMask Tags;
+		return ZoneGraph->FindNearestLane(FBox::BuildAABB(Point, FVector(500.0, 500.0, 200.0)), FZoneGraphTagFilter(), Location, DistanceSquared)
+			&& ZoneGraph->GetLaneTags(Location.LaneHandle, Tags) && Tags.Contains(Tag);
+	}
+
 	static bool IsFarEnoughFromExistingPoints(const TArray<FVector>& ExistingPoints, const FVector& CandidatePoint, const float MinSeparationCm)
 	{
 		if (MinSeparationCm <= 0.0f)
@@ -54,6 +71,27 @@ void URammsCrowdBoxSpawnPointsGenerator::Generate(UObject& QueryOwner, TConstArr
 	TArray<FVector>	 AcceptedLocations;
 	AcceptedLocations.Reserve(Count);
 
+	// The traffic's vehicle lanes (when the project defines the tag): a walker placed nearer one than any pedestrian
+	// lane would snap onto it.
+	FZoneGraphTag Excluded;
+	if (!ExcludeLaneTagName.IsNone())
+	{
+		if (const UZoneGraphSettings* Settings = GetDefault<UZoneGraphSettings>())
+		{
+			for (const FZoneGraphTagInfo& Info : Settings->GetTagInfos())
+			{
+				if (Info.IsValid() && Info.Name == ExcludeLaneTagName)
+				{
+					Excluded = Info.Tag;
+					break;
+				}
+			}
+		}
+	}
+	const UWorld* World = QueryOwner.GetWorld();
+	const UZoneGraphSubsystem* ZoneGraph = Excluded.IsValid() && World != nullptr ? UWorld::GetSubsystem<UZoneGraphSubsystem>(World) : nullptr;
+	int32 OnExcludedLanes = 0;
+
 	auto BuildRandomTransform = [&](const FVector& Location) -> FTransform {
 		FQuat Rotation = BaseRotation;
 		if (bRandomizeYaw)
@@ -84,7 +122,7 @@ void URammsCrowdBoxSpawnPointsGenerator::Generate(UObject& QueryOwner, TConstArr
 					RandomStream.FRandRange(-BoxExtent.Y, BoxExtent.Y),
 					RandomStream.FRandRange(-BoxExtent.Z, BoxExtent.Z));
 				const FVector CandidateLocation = OwnerTransform.TransformPosition(LocalCenter + LocalOffset);
-				if (IsFarEnoughFromExistingPoints(AcceptedLocations, CandidateLocation, MinSeparationCm))
+				if (IsFarEnoughFromExistingPoints(AcceptedLocations, CandidateLocation, MinSeparationCm) && !IsNearestLaneTagged(ZoneGraph, Excluded, CandidateLocation))
 				{
 					SelectedLocation = CandidateLocation;
 					bFoundSeparatedLocation = true;
@@ -94,11 +132,20 @@ void URammsCrowdBoxSpawnPointsGenerator::Generate(UObject& QueryOwner, TConstArr
 
 			if (bFoundSeparatedLocation == false)
 			{
-				const FVector LocalOffset(
-					RandomStream.FRandRange(-BoxExtent.X, BoxExtent.X),
-					RandomStream.FRandRange(-BoxExtent.Y, BoxExtent.Y),
-					RandomStream.FRandRange(-BoxExtent.Z, BoxExtent.Z));
-				SelectedLocation = OwnerTransform.TransformPosition(LocalCenter + LocalOffset);
+				// No separated point: any point off the excluded lanes, else any point at all.
+				for (int32 AttemptIndex = 0; AttemptIndex < FMath::Max(MaxPlacementAttemptsPerEntity, 1); ++AttemptIndex)
+				{
+					const FVector LocalOffset(
+						RandomStream.FRandRange(-BoxExtent.X, BoxExtent.X),
+						RandomStream.FRandRange(-BoxExtent.Y, BoxExtent.Y),
+						RandomStream.FRandRange(-BoxExtent.Z, BoxExtent.Z));
+					SelectedLocation = OwnerTransform.TransformPosition(LocalCenter + LocalOffset);
+					if (!IsNearestLaneTagged(ZoneGraph, Excluded, SelectedLocation))
+					{
+						break;
+					}
+				}
+				OnExcludedLanes += IsNearestLaneTagged(ZoneGraph, Excluded, SelectedLocation) ? 1 : 0;
 			}
 
 			AcceptedLocations.Add(SelectedLocation);
@@ -110,6 +157,11 @@ void URammsCrowdBoxSpawnPointsGenerator::Generate(UObject& QueryOwner, TConstArr
 		*GetNameSafe(&QueryOwner),
 		AcceptedLocations.Num(),
 		Results.Num());
+	if (OnExcludedLanes > 0)
+	{
+		UE_LOG(LogRammsCrowd, Warning, TEXT("[%s] Box generator: %d spawn points are nearest a '%s' lane (no other room in the box); those walkers start on it."),
+			*GetNameSafe(&QueryOwner), OnExcludedLanes, *ExcludeLaneTagName.ToString());
+	}
 	constexpr int32 MaxLoggedLocations = 5;
 	for (int32 LocationIndex = 0; LocationIndex < FMath::Min(AcceptedLocations.Num(), MaxLoggedLocations); ++LocationIndex)
 	{
