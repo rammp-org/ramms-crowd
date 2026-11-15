@@ -26,8 +26,11 @@ namespace
 		for (int32 i = 0; i < Steps; ++i)
 		{
 			const double Accel = FMath::Clamp(RammsTraffic::IdmFollow(Speed, FMath::Max(Gap, 0.0), 0.0, Idm), -MaxDecel, Idm.MaxAcceleration);
-			OutPeakDecel = FMath::Max(OutPeakDecel, -Accel);
+			const double Before = Speed;
 			Gap -= RammsTraffic::Advance(Speed, Accel, Dt, Idm.DesiredSpeed, FMath::Max(Gap, 0.0));
+			// The deceleration the car undergoes (speed lost per second), not the command: at the very end the
+			// model brakes "as hard as it can" from a crawl of a few cm/s, which takes one frame and is not felt.
+			OutPeakDecel = FMath::Max(OutPeakDecel, (Before - Speed) / Dt);
 		}
 	}
 }
