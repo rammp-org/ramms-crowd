@@ -45,10 +45,17 @@ For customizing appearance, animation, and behavior after setup, see
     density-weighted wander selection.**
   - Traffic (README, "Traffic"): tags `Vehicle(6)`, `Intersection(7)`, `Signalized(8)`
     and the profiles **VehicleLanes** / **VehicleLanesNarrow** (Vehicle bit only). Lanes
-    tagged `Crossing` are closed by MassCrowd until something opens them: in generated
-    levels only the crossings at signalized intersections carry it, and the traffic
-    signal clock opens them for Walk (`URammsCrossingGateProcessor` holds walkers at a
-    closed one).
+    tagged `Crossing` are the ones a signal controls: in generated levels only the
+    crossings at signalized intersections carry it, and the traffic signal clock opens
+    them for Walk and closes them otherwise (`URammsCrossingGateProcessor` holds walkers at
+    a closed one). MassCrowd itself only marks them closed with a ZoneGraph annotation
+    tag; its lane state (`UMassCrowdSubsystem::GetLaneState`, what the gate reads) stays
+    Opened until the clock sets it, so without a clock nobody is held for a signal.
+  - Crowd entity config with traffic: give the **ZoneGraph Navigation** trait a
+    `LaneFilter` with `NotTags` = `Vehicle`, so a crowd member placed near a road never
+    snaps onto a vehicle lane (the RAMMS crowd spawner's generators already skip points on
+    or nearest such lanes: `ExcludeLaneTagName`; `URammsCrossingGateProcessor` warns once
+    when it finds crowd members on vehicle lanes).
 - `Config/DefaultMass.ini`
   - `[/Script/MassMovement.MassMovementSettings]` — movement styles `Walking`, `Jogging`,
     `RobotDrive`.
