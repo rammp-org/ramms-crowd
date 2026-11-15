@@ -292,11 +292,11 @@ bool ARammsTrafficSpawner::SpawnTraffic()
 		FRammsTrafficVisualFragment& VisualFragment = EntityManager.GetFragmentDataChecked<FRammsTrafficVisualFragment>(Entities[i]);
 		VisualFragment.CollisionRadius = CollisionRadius;
 		VisualFragment.GroundTraceRadius = GroundTraceRadius;
-		FActorSpawnParameters Params;
-		Params.Owner = this;
-		Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
-		Params.ObjectFlags |= RF_Transient;
-		ARammsTrafficVehicleActor* Actor = World->SpawnActor<ARammsTrafficVehicleActor>(ActorClass, Transform, Params);
+		FActorSpawnParameters SpawnParams;
+		SpawnParams.Owner = this;
+		SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+		SpawnParams.ObjectFlags |= RF_Transient;
+		ARammsTrafficVehicleActor* Actor = World->SpawnActor<ARammsTrafficVehicleActor>(ActorClass, Transform, SpawnParams);
 		if (Actor != nullptr)
 		{
 			Actor->SetupVehicle(Car);
