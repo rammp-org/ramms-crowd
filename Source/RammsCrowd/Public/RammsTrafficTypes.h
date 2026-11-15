@@ -66,6 +66,10 @@ enum class ERammsTrafficYield : uint8
 	Pedestrian,
 	Robot,
 	Turn,
+	/** Behind a car on its lane that has not been let in (or stands): it takes no claim until it is first at the line. */
+	Queue,
+	/** Its lane leads nowhere: it stops at the end (and starts again elsewhere once nobody sees it). */
+	DeadEnd,
 };
 
 /**
@@ -103,6 +107,10 @@ struct RAMMSCROWD_API FRammsSignalTiming
 
 	/** Length of one full cycle, s. */
 	double GetCycleSeconds() const;
+
+	/** How long pedestrians walking along Axis (0 X, 1 Y) see Walk each cycle, s: 0 when PedestrianClearanceSeconds
+	 *  takes up the whole parallel green (their crossings then never open). */
+	double GetWalkSeconds(int32 Axis) const;
 };
 
 /** The signals at one moment. */
@@ -238,9 +246,11 @@ struct RAMMSCROWD_API FRammsTrafficDrivingParams : public FMassConstSharedFragme
 	float LeftTurnGapSeconds = 4.5f;
 
 	/** Deadlock breaker: a vehicle that has stood this long in all at its stop line held by other vehicles' rules
-	 *  (claims, arrival order, the box, oncoming traffic; time at a red light neither counts nor resets it) enters
-	 *  as soon as no vehicle on a conflicting lane is physically in the intersection. A vehicle that has stood this
-	 *  long for nothing but a walker who does not move drives on past standing walkers (logged as a warning). */
+	 *  (claims, arrival order, oncoming traffic; time at a red light, in a queue or at the box neither counts nor
+	 *  resets it) stops waiting for vehicles that are only let in: it enters as soon as no vehicle on a conflicting
+	 *  lane is in the intersection or let in and unable to stop, no oncoming vehicle it would turn across is unable to
+	 *  stop, and its exit has room for it. A vehicle that has stood this long for nothing but a walker who does not
+	 *  move drives on past that walker (logged as a warning). */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Ramms|Traffic|Rules", meta = (ClampMin = "1.0", Units = "s"))
 	float MaxWaitSeconds = 20.0f;
 
@@ -252,7 +262,8 @@ struct RAMMSCROWD_API FRammsTrafficDrivingParams : public FMassConstSharedFragme
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Ramms|Traffic|Yield", meta = (ClampMin = "0.0", Units = "s"))
 	float CrossingHoldSeconds = 2.0f;
 
-	/** Pedestrians and the robot count as in the vehicle's way within its half width plus this, either side of its path. */
+	/** Pedestrians and the robot on the carriageway (overlapping the vehicle's lane) count as in its way within its half
+	 *  width plus this, either side of its path; off it, or waiting at the kerb, only when physically in its path. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Ramms|Traffic|Yield", meta = (ClampMin = "0.0", Units = "cm"))
 	float CorridorMargin = 60.0f;
 
@@ -271,6 +282,10 @@ struct RAMMSCROWD_API FRammsTrafficDrivingParams : public FMassConstSharedFragme
 	/** ... and at least this far. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Ramms|Traffic|Yield", meta = (ClampMin = "100.0", Units = "cm"))
 	float MinLookahead = 1500.0f;
+
+	/** A copy with every value inside the ranges the editor enforces (ClampMin / ClampMax): values set from Python or
+	 *  Blueprint bypass them, and a zero deceleration or headway would divide by zero. */
+	FRammsTrafficDrivingParams Sanitized() const;
 };
 
 /** A traffic vehicle's state on the lane network (URammsTrafficSubsystem lane indices). */
@@ -294,14 +309,17 @@ struct RAMMSCROWD_API FRammsTrafficVehicleFragment : public FMassFragment
 	/** All-way stop: seconds stood at the line, and when it got there (world time; -1 = not yet). */
 	float StoppedAtLine = 0.0f;
 	float ArrivalTime = -1.0f;
-	/** Seconds stood at the stop line held by other vehicles' rules (see MaxWaitSeconds). */
+	/** Seconds stood at the stop line held by other vehicles' rules (see MaxWaitSeconds; not a red light, a queue or
+	 *  the box). */
 	float BlockedTime = 0.0f;
 	/** Deterministic per-vehicle random stream (route choices). */
 	uint32 RandomState = 1;
 	/** Index into the spawner's car meshes. */
 	int32 Visual = INDEX_NONE;
-	/** The intersection lane it just left, while its rear is still in the intersection (it keeps that claim). */
+	/** The intersection lane it just left, while its rear is still in the intersection (it keeps that claim), and
+	 *  where that lane ended, as a distance along Lane (0, or negative once it is a lane further on). */
 	int32 PrevLane = INDEX_NONE;
+	float PrevLaneEnd = 0.0f;
 	/** May enter the intersection ahead (all-way stop turn taken, or signal and gaps checked). */
 	bool bGranted = false;
 	/** A permitted left turn that waited at the line for oncoming traffic this green: it may go on the amber. */
@@ -322,9 +340,15 @@ struct RAMMSCROWD_API FRammsTrafficVehicleFragment : public FMassFragment
 	float WalkersSince = -1.0f;
 	float WalkersLast = -1.0f;
 	float WalkersWait = 0.0f;
-	/** After MaxWaitSeconds stood for a walker who does not move: how much further it drives past walkers standing
-	 *  in its way, cm (the walker deadlock breaker). */
+	/** Seconds stopped for a walker who stands (blocked by others, not crossing): past StuckWalkerReleaseSeconds it
+	 *  stops holding newcomers at the crossing, so the crowd waiting there can move out of that walker's way. */
+	float StuckWalkerWait = 0.0f;
+	/** After MaxWaitSeconds stood for a walker who does not move: that walker, and how much further it drives past
+	 *  them while they stand, cm (the walker deadlock breaker; every other walker is still stopped for). */
+	FMassEntityHandle PastWalker;
 	float PastStandingWalkers = 0.0f;
+	/** Seconds stood at the end of a lane that leads nowhere. */
+	float DeadEndWait = 0.0f;
 	FVector Velocity = FVector::ZeroVector;
 };
 
@@ -377,6 +401,37 @@ namespace RammsTraffic
 
 	/** Deceleration (<= 0) that brings Speed down to CapSpeed over Distance, or +inf when it is already at or under the cap. */
 	RAMMSCROWD_API double SlowToCap(double Speed, double CapSpeed, double Distance);
+
+	/**
+	 * The slowdown for a turn ahead: SlowToCap once it takes at least half the comfortable deceleration (drivers
+	 * brake for a turn when they need to, not from the far end of the block), else +inf (no constraint).
+	 */
+	RAMMSCROWD_API double TurnSlowdown(double Speed, double CapSpeed, double Distance, double ComfortDeceleration);
+
+	/**
+	 * Whether a vehicle can no longer stop at its line: over it already (DistanceToLine < 0), or too fast to stop in
+	 * the distance left even with MaxDeceleration. A vehicle let in that is committed goes on in, and every other
+	 * vehicle respects its claim (the deadlock breaker too).
+	 */
+	RAMMSCROWD_API bool IsCommitted(double Speed, double DistanceToLine, double MaxDeceleration);
+
+	/**
+	 * Whether something Distance (2D, cm) from a vehicle's path, with Radius, is in its way. Physically in its path
+	 * (within its half width plus the radius): always. Otherwise only when it is not waiting and is on the
+	 * carriageway (it overlaps the lane: Distance - Radius < LaneHalfWidth) within VehicleHalfWidth + Margin + Radius.
+	 * Walkers waiting at the kerb (held, or standing off the road part of a crossing or on a sidewalk) and anything
+	 * beside the lane never stop a car unless they are physically in its path.
+	 */
+	RAMMSCROWD_API bool IsInTheWay(double Distance, double Radius, double VehicleHalfWidth, double LaneHalfWidth, double Margin, bool bWaiting);
+
+	/**
+	 * Whether a walker is waiting rather than crossing (cars do not keep their margin for it, see IsInTheWay): held at a
+	 * crossing's start; or standing on a lane that is not a street crossing; or standing on a street crossing short of
+	 * its first vehicle lane's centre (RoadStart: at the kerb) or past its last one (RoadEnd: finishing, possibly held up
+	 * by the crowd waiting at the far kerb). Moving walkers, walkers with no lane and walkers standing in the middle of
+	 * the road are not waiting.
+	 */
+	RAMMSCROWD_API bool IsWalkerWaiting(bool bHeld, bool bOnLane, bool bStanding, bool bStreetCrossing, float LaneDistance, float RoadStart, float RoadEnd);
 
 	/**
 	 * One step: speed += Accel * Dt, clamped to [0, MaxSpeed]; returns the distance travelled (speed after the

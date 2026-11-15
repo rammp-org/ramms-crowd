@@ -59,6 +59,11 @@ struct RAMMSCROWD_API FRammsCrossingWaitFragment : public FMassFragment
 	UPROPERTY()
 	bool bHolding = false;
 
+	/** Held for a car (its crossing open): it keeps waiting while any car holds the crossing. One held for the signal
+	 *  goes on Walk unless a car that was there first holds it. */
+	UPROPERTY()
+	bool bHeldForCar = false;
+
 	/** The ZoneGraph lane it was on last frame, and the world time it came onto it. */
 	UPROPERTY()
 	FZoneGraphLaneHandle Lane;

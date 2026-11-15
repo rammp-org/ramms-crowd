@@ -3,6 +3,7 @@
 #include "RammsCrossingGateProcessor.h"
 
 #include "Engine/World.h"
+#include "MassCommonFragments.h"
 #include "MassCommonTypes.h"
 #include "MassCrowdSettings.h"
 #include "MassCrowdSubsystem.h"
@@ -29,80 +30,123 @@ void URammsCrossingGateProcessor::ConfigureQueries(const TSharedRef<FMassEntityM
 	EntityQuery.AddRequirement<FMassZoneGraphLaneLocationFragment>(EMassFragmentAccess::ReadOnly);
 	EntityQuery.AddRequirement<FMassMoveTargetFragment>(EMassFragmentAccess::ReadWrite);
 	EntityQuery.AddRequirement<FRammsCrossingWaitFragment>(EMassFragmentAccess::ReadWrite);
+	EntityQuery.AddRequirement<FAgentRadiusFragment>(EMassFragmentAccess::ReadOnly, EMassFragmentPresence::Optional);
+}
+
+float URammsCrossingGateProcessor::HoldLimit(const FRammsStreetCrossing* Crossing, const float Radius)
+{
+	if (Crossing == nullptr)
+	{
+		return HoldDistanceCm;
+	}
+	return FMath::Clamp(Crossing->EdgeStart - Radius - 10.0f, MinHoldDistanceCm, HoldDistanceCm);
+}
+
+bool URammsCrossingGateProcessor::UpdateWait(FRammsCrossingWaitFragment& Wait, const FZoneGraphLaneHandle& Lane, const float DistanceAlongLane, const float Limit,
+	const bool bSignalClosed, const float* CarHoldSince, const float Now, float& InOutDesiredSpeed)
+{
+	if (Wait.Lane != Lane)
+	{
+		Wait.Lane = Lane;
+		Wait.LaneSince = Now;
+		Wait.bHeldForCar = false;
+	}
+	bool bHold = false;
+	bool bForCar = false;
+	if (Lane.IsValid() && DistanceAlongLane <= Limit)
+	{
+		// Nobody steps in front of a car that is clearing the intersection or driving over the crossing, nor in front
+		// of one that began to yield to other walkers before they came; and whoever waits for a car keeps waiting while
+		// any car holds the crossing (the car was there first). Whoever waited for the signal goes on Walk unless a car
+		// was there first.
+		bForCar = CarHoldSince != nullptr && (Wait.LaneSince >= *CarHoldSince || Wait.bHeldForCar);
+		bHold = bSignalClosed || bForCar;
+	}
+	Wait.bHeldForCar = bHold && bForCar && !bSignalClosed;
+
+	if (bHold)
+	{
+		// The StateTree may have just asked for a new path at walking speed: remember it, then stand.
+		if (InOutDesiredSpeed > 1.0f)
+		{
+			Wait.HeldSpeed = InOutDesiredSpeed;
+		}
+		Wait.bHolding = true;
+		InOutDesiredSpeed = 0.0f;
+	}
+	else if (Wait.bHolding)
+	{
+		if (InOutDesiredSpeed <= 1.0f && Wait.HeldSpeed > 1.0f)
+		{
+			InOutDesiredSpeed = Wait.HeldSpeed;
+		}
+		Wait.bHolding = false;
+	}
+	return bHold;
 }
 
 void URammsCrossingGateProcessor::Execute(FMassEntityManager& EntityManager, FMassExecutionContext& Context)
 {
-	const UMassCrowdSettings* CrowdSettings = GetDefault<UMassCrowdSettings>();
 	UWorld* World = Context.GetWorld();
-	if (CrowdSettings == nullptr || World == nullptr || !CrowdSettings->CrossingTag.IsValid())
+	if (World == nullptr)
 	{
 		return;
 	}
-	const FZoneGraphTag CrossingTag = CrowdSettings->CrossingTag;
+	const UMassCrowdSettings* CrowdSettings = GetDefault<UMassCrowdSettings>();
+	const FZoneGraphTag CrossingTag = CrowdSettings != nullptr ? CrowdSettings->CrossingTag : FZoneGraphTag();
 	const UMassCrowdSubsystem* Crowd = UWorld::GetSubsystem<UMassCrowdSubsystem>(World);
 	const UZoneGraphSubsystem* ZoneGraph = UWorld::GetSubsystem<UZoneGraphSubsystem>(World);
-	if (Crowd == nullptr || ZoneGraph == nullptr)
+	// Crossings a traffic vehicle is over or about to cross, street crossings and vehicle lanes (none without traffic).
+	URammsTrafficSubsystem* Traffic = UWorld::GetSubsystem<URammsTrafficSubsystem>(World);
+	const double Now = World->GetTimeSeconds();
+	const bool bCarHolds = Traffic != nullptr && Traffic->GetHeldCrossingCount(Now) > 0;
+	if (!CrossingTag.IsValid() && !bCarHolds && Traffic == nullptr)
 	{
 		return;
 	}
-	// Crossings a traffic vehicle is over or about to cross (none without traffic).
-	const URammsTrafficSubsystem* Traffic = UWorld::GetSubsystem<URammsTrafficSubsystem>(World);
-	const URammsTrafficSubsystem* Held = Traffic != nullptr && Traffic->GetHeldCrossingCount() > 0 ? Traffic : nullptr;
-	const float Now = static_cast<float>(World->GetTimeSeconds());
+	int32 OnVehicleLanes = 0;
 
-	EntityQuery.ForEachEntityChunk(Context, [Crowd, ZoneGraph, CrossingTag, Held, Now](FMassExecutionContext& Context)
+	EntityQuery.ForEachEntityChunk(Context, [Crowd, ZoneGraph, CrossingTag, Traffic, bCarHolds, Now, &OnVehicleLanes](FMassExecutionContext& Context)
 	{
 		const TConstArrayView<FMassZoneGraphLaneLocationFragment> LaneList = Context.GetFragmentView<FMassZoneGraphLaneLocationFragment>();
 		const TArrayView<FMassMoveTargetFragment> MoveTargetList = Context.GetMutableFragmentView<FMassMoveTargetFragment>();
 		const TArrayView<FRammsCrossingWaitFragment> WaitList = Context.GetMutableFragmentView<FRammsCrossingWaitFragment>();
+		const TConstArrayView<FAgentRadiusFragment> RadiusList = Context.GetFragmentView<FAgentRadiusFragment>();
 		for (FMassExecutionContext::FEntityIterator EntityIt = Context.CreateEntityIterator(); EntityIt; ++EntityIt)
 		{
 			const FMassZoneGraphLaneLocationFragment& Location = LaneList[EntityIt];
-			FMassMoveTargetFragment& MoveTarget = MoveTargetList[EntityIt];
-			FRammsCrossingWaitFragment& Wait = WaitList[EntityIt];
-			if (Wait.Lane != Location.LaneHandle)
-			{
-				Wait.Lane = Location.LaneHandle;
-				Wait.LaneSince = Now;
-			}
-			bool bHold = false;
-			if (Location.LaneHandle.IsValid() && Location.DistanceAlongLane <= HoldDistanceCm)
+			const FZoneGraphLaneHandle& Lane = Location.LaneHandle;
+			const float Radius = RadiusList.IsEmpty() ? 25.0f : RadiusList[EntityIt].Radius; // (URammsCrowdAgentTrait's default)
+			const FRammsStreetCrossing* Crossing = Traffic != nullptr && Lane.IsValid() ? Traffic->FindStreetCrossing(Lane) : nullptr;
+			const float Limit = HoldLimit(Crossing, Radius);
+			OnVehicleLanes += Traffic != nullptr && Lane.IsValid() && Traffic->IsVehicleLane(Lane) ? 1 : 0;
+
+			bool bSignalClosed = false;
+			const float* CarHoldSince = nullptr;
+			if (Lane.IsValid() && Location.DistanceAlongLane <= Limit)
 			{
 				FZoneGraphTagMask Tags;
-				if (ZoneGraph->GetLaneTags(Location.LaneHandle, Tags) && Tags.Contains(CrossingTag) && Crowd->HasCrowdDataForZoneGraph(Location.LaneHandle.DataHandle))
+				if (CrossingTag.IsValid() && Crowd != nullptr && ZoneGraph != nullptr && ZoneGraph->GetLaneTags(Lane, Tags) && Tags.Contains(CrossingTag)
+					&& Crowd->HasCrowdDataForZoneGraph(Lane.DataHandle))
 				{
-					bHold = Crowd->GetLaneState(Location.LaneHandle) == ECrowdLaneState::Closed;
+					bSignalClosed = Crowd->GetLaneState(Lane) == ECrowdLaneState::Closed;
 				}
-				// Nobody steps in front of a car that is clearing the intersection or driving over the crossing, nor in
-				// front of one that began to yield to other walkers before they came; and whoever waits for a car
-				// keeps waiting while any car holds the crossing (the car was there first).
-				if (Held != nullptr && !bHold)
-				{
-					const float* Since = Held->FindCrossingHold(Location.LaneHandle);
-					bHold = Since != nullptr && (Wait.LaneSince >= *Since || Wait.bHolding);
-				}
+				CarHoldSince = bCarHolds ? Traffic->FindCrossingHold(Lane, Now) : nullptr;
 			}
 
-			if (bHold)
+			FMassMoveTargetFragment& MoveTarget = MoveTargetList[EntityIt];
+			float DesiredSpeed = MoveTarget.DesiredSpeed.Get();
+			const float Before = DesiredSpeed;
+			UpdateWait(WaitList[EntityIt], Lane, Location.DistanceAlongLane, Limit, bSignalClosed, CarHoldSince, static_cast<float>(Now), DesiredSpeed);
+			if (DesiredSpeed != Before)
 			{
-				// The StateTree may have just asked for a new path at walking speed: remember it, then stand.
-				const float Speed = MoveTarget.DesiredSpeed.Get();
-				if (Speed > 1.0f)
-				{
-					Wait.HeldSpeed = Speed;
-				}
-				Wait.bHolding = true;
-				MoveTarget.DesiredSpeed.Set(0.0f);
-			}
-			else if (Wait.bHolding)
-			{
-				if (MoveTarget.DesiredSpeed.Get() <= 1.0f && Wait.HeldSpeed > 1.0f)
-				{
-					MoveTarget.DesiredSpeed.Set(Wait.HeldSpeed);
-				}
-				Wait.bHolding = false;
+				MoveTarget.DesiredSpeed.Set(DesiredSpeed);
 			}
 		}
 	});
+
+	if (Traffic != nullptr)
+	{
+		Traffic->WarnWalkersOnVehicleLanes(OnVehicleLanes);
+	}
 }

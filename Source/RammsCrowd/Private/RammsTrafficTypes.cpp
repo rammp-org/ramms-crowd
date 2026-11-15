@@ -10,6 +10,41 @@ double FRammsSignalTiming::GetCycleSeconds() const
 	return FMath::Max(GreenSecondsX, 1.0f) + FMath::Max(GreenSecondsY, 1.0f) + Shared;
 }
 
+double FRammsSignalTiming::GetWalkSeconds(const int32 Axis) const
+{
+	// As FRammsSignalCycle::Evaluate: Walk for the start of the parallel green, clearance for its end.
+	const double Green = FMath::Max(Axis == 0 ? GreenSecondsX : GreenSecondsY, 1.0f);
+	const double Clearance = FMath::Clamp(static_cast<double>(PedestrianClearanceSeconds), 0.0, Green);
+	return Green - Clearance;
+}
+
+FRammsTrafficDrivingParams FRammsTrafficDrivingParams::Sanitized() const
+{
+	// The ranges of the UPROPERTY ClampMin / ClampMax metadata, which only the editor's details panel applies.
+	FRammsTrafficDrivingParams P = *this;
+	P.SpeedLimit = FMath::Max(P.SpeedLimit, 100.0f);
+	P.SpeedVariation = FMath::Clamp(P.SpeedVariation, 0.0f, 0.5f);
+	P.MaxAcceleration = FMath::Max(P.MaxAcceleration, 10.0f);
+	P.ComfortDeceleration = FMath::Max(P.ComfortDeceleration, 10.0f);
+	P.MaxDeceleration = FMath::Max(P.MaxDeceleration, 100.0f);
+	P.TimeHeadway = FMath::Max(P.TimeHeadway, 0.1f);
+	P.MinGap = FMath::Max(P.MinGap, 0.0f);
+	P.StopLineGap = FMath::Max(P.StopLineGap, 0.0f);
+	P.AmberStopDeceleration = FMath::Max(P.AmberStopDeceleration, 10.0f);
+	P.RightTurnSpeed = FMath::Max(P.RightTurnSpeed, 50.0f);
+	P.LeftTurnSpeed = FMath::Max(P.LeftTurnSpeed, 50.0f);
+	P.AllWayStopSeconds = FMath::Max(P.AllWayStopSeconds, 0.0f);
+	P.LeftTurnGapSeconds = FMath::Max(P.LeftTurnGapSeconds, 0.0f);
+	P.MaxWaitSeconds = FMath::Max(P.MaxWaitSeconds, 1.0f);
+	P.CrossingHoldSeconds = FMath::Max(P.CrossingHoldSeconds, 0.0f);
+	P.CorridorMargin = FMath::Max(P.CorridorMargin, 0.0f);
+	P.PredictSeconds = FMath::Max(P.PredictSeconds, 0.0f);
+	P.ObstacleGap = FMath::Max(P.ObstacleGap, 0.0f);
+	P.LookaheadSeconds = FMath::Max(P.LookaheadSeconds, 0.5f);
+	P.MinLookahead = FMath::Max(P.MinLookahead, 100.0f);
+	return P;
+}
+
 FRammsSignalState FRammsSignalCycle::Evaluate(const FRammsSignalTiming& Timing, const double TimeSeconds)
 {
 	const double Green[2] = { FMath::Max(Timing.GreenSecondsX, 1.0f), FMath::Max(Timing.GreenSecondsY, 1.0f) };
@@ -115,6 +150,57 @@ namespace RammsTraffic
 			return TNumericLimits<double>::Max();
 		}
 		return (CapSpeed * CapSpeed - Speed * Speed) / (2.0 * FMath::Max(Distance, 50.0));
+	}
+
+	double TurnSlowdown(const double Speed, const double CapSpeed, const double Distance, const double ComfortDeceleration)
+	{
+		const double Decel = SlowToCap(Speed, CapSpeed, Distance);
+		// Not yet: it would only take a gentle touch of the brakes (it brakes at half the comfortable rate once due).
+		if (Decel > -0.5 * FMath::Max(ComfortDeceleration, 10.0))
+		{
+			return TNumericLimits<double>::Max();
+		}
+		return Decel;
+	}
+
+	bool IsCommitted(const double Speed, const double DistanceToLine, const double MaxDeceleration)
+	{
+		if (DistanceToLine < 0.0)
+		{
+			return true;
+		}
+		const double V = FMath::Max(Speed, 0.0);
+		return V * V / (2.0 * FMath::Max(MaxDeceleration, 1.0)) > DistanceToLine + 1.0;
+	}
+
+	bool IsInTheWay(const double Distance, const double Radius, const double VehicleHalfWidth, const double LaneHalfWidth, const double Margin, const bool bWaiting)
+	{
+		if (Distance < VehicleHalfWidth + Radius)
+		{
+			return true; // physically in its path
+		}
+		if (bWaiting)
+		{
+			return false;
+		}
+		return Distance - Radius < LaneHalfWidth && Distance < VehicleHalfWidth + Margin + Radius;
+	}
+
+	bool IsWalkerWaiting(const bool bHeld, const bool bOnLane, const bool bStanding, const bool bStreetCrossing, const float LaneDistance, const float RoadStart, const float RoadEnd)
+	{
+		if (bHeld)
+		{
+			return true;
+		}
+		if (!bStanding || !bOnLane)
+		{
+			return false;
+		}
+		if (!bStreetCrossing)
+		{
+			return true; // a sidewalk, a plaza: a crowd standing there may spill over the kerb
+		}
+		return LaneDistance <= RoadStart || LaneDistance >= RoadEnd;
 	}
 
 	double Advance(double& InOutSpeed, const double Accel, const double DeltaSeconds, const double MaxSpeed, const double StopDistance)
