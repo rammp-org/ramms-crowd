@@ -702,6 +702,7 @@ bool FRammsTrafficLaneEndsTest::RunTest(const FString& Parameters)
 	const int32 Loop = T.AddLane({ FVector2D(0.0, 6000.0), FVector2D(6000.0, 6000.0) });
 	T.Link(Loop, Loop);
 	T.Finish();
+	// From 10 m/s, 15 m short of the end. IDM creeps the last metre into a stop: standing after some 9 s.
 	for (const bool bWatched : { false, true })
 	{
 		FTestTraffic Traffic(T.Net);
@@ -712,27 +713,37 @@ bool FRammsTrafficLaneEndsTest::RunTest(const FString& Parameters)
 		}
 		bool bOvershot = false;
 		bool bStoppedForIt = false;
-		for (int32 i = 0; i < 150 && Traffic.Vehicles[Car].Lane == DeadEnd; ++i)
+		auto Drive = [&](const int32 Frames)
 		{
-			Traffic.Step();
-			const FRammsTrafficVehicleFragment& V = Traffic.Vehicles[Car];
-			if (V.Lane == DeadEnd)
+			for (int32 i = 0; i < Frames && Traffic.Vehicles[Car].Lane == DeadEnd; ++i)
 			{
-				bOvershot |= V.Distance + V.HalfLength > T.Net.Lanes[DeadEnd].Length - Traffic.Params.StopLineGap + 1.0f;
-				bStoppedForIt |= V.Yield == ERammsTrafficYield::DeadEnd;
+				Traffic.Step();
+				const FRammsTrafficVehicleFragment& V = Traffic.Vehicles[Car];
+				if (V.Lane == DeadEnd)
+				{
+					bOvershot |= V.Distance + V.HalfLength > T.Net.Lanes[DeadEnd].Length - Traffic.Params.StopLineGap + 1.0f;
+					bStoppedForIt |= V.Yield == ERammsTrafficYield::DeadEnd;
+				}
 			}
-		}
-		TestFalse(TEXT("dead end: never past its end"), bOvershot);
-		TestTrue(TEXT("dead end: it stops for it"), bStoppedForIt || !bWatched);
-		if (bWatched)
+		};
+		if (!bWatched)
 		{
-			TestEqual(TEXT("dead end, a player near: it waits there"), Traffic.Vehicles[Car].Lane, DeadEnd);
-			TestTrue(TEXT("dead end, a player near: standing"), Traffic.Vehicles[Car].Speed < 1.0f);
-		}
-		else
-		{
+			// Nobody near: it starts again elsewhere as soon as it reaches the end (within 1.5 m), about 3.5 s.
+			Drive(10 * 30);
+			TestFalse(TEXT("dead end, nobody near: never past its end"), bOvershot);
 			TestEqual(TEXT("dead end, nobody near: it starts again elsewhere"), Traffic.Vehicles[Car].Lane, Loop);
+			continue;
 		}
+		// A player beside it: it stops at the end and stands there ...
+		Drive(15 * 30);
+		TestFalse(TEXT("dead end, a player near: never past its end"), bOvershot);
+		TestTrue(TEXT("dead end, a player near: it stops for it"), bStoppedForIt);
+		TestEqual(TEXT("dead end, a player near: it waits there"), Traffic.Vehicles[Car].Lane, DeadEnd);
+		TestTrue(TEXT("dead end, a player near: standing"), Traffic.Vehicles[Car].Speed < 1.0f);
+		// ... until it has stood there MaxWaitSeconds (counted from close and slow), then starts again elsewhere.
+		Drive(25 * 30);
+		TestFalse(TEXT("dead end, a player near: still never past its end"), bOvershot);
+		TestEqual(TEXT("dead end, a player near: after MaxWaitSeconds it starts again elsewhere"), Traffic.Vehicles[Car].Lane, Loop);
 	}
 
 	// Out of one intersection over a road shorter than the car into the next: its rear keeps the first one's claim.

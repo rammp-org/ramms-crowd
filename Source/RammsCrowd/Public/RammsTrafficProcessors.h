@@ -52,7 +52,7 @@
  * have separated. Walkers are held at the start of any crossing a car is over or about to cross
  * (URammsTrafficSubsystem::SetHeldCrossings, published every frame, empty when there is nothing to drive), so a car
  * clearing the intersection is not trapped by the next Walk. A lane that leads nowhere ends in a stop; a car
- * standing there starts again elsewhere once no player is near (or after MaxWaitSeconds).
+ * reaching it starts again elsewhere at once when no player is near, else after standing there MaxWaitSeconds.
  *
  * Cars and walkers at a crossing: who was first goes first. A car driving on holds everyone at the kerb (within
  * CrossingHoldSeconds, and at least its comfortable stopping distance); walkers already crossing are stopped for.
