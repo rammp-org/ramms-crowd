@@ -3,8 +3,14 @@
 #pragma once
 
 #include "CoreMinimal.h"
-#include "MassEntityHandle.h"
-#include "MassExternalSubsystemTraits.h"
+#include "Misc/EngineVersionComparison.h"
+#if UE_VERSION_OLDER_THAN(5, 8, 0)
+	#include "MassEntityHandle.h"
+	#include "MassExternalSubsystemTraits.h"
+#else
+	#include "Mass/EntityHandle.h" // UE 5.8 moved them into MassCore
+	#include "Mass/ExternalSubsystemTraits.h"
+#endif
 #include "Subsystems/WorldSubsystem.h"
 #include "RammsStimulusSubsystem.generated.h"
 

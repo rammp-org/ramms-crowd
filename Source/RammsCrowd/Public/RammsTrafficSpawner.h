@@ -5,7 +5,12 @@
 #include "CoreMinimal.h"
 #include "GameFramework/Actor.h"
 #include "MassEntityConfigAsset.h"
-#include "MassEntityHandle.h"
+#include "Misc/EngineVersionComparison.h"
+#if UE_VERSION_OLDER_THAN(5, 8, 0)
+	#include "MassEntityHandle.h"
+#else
+	#include "Mass/EntityHandle.h" // UE 5.8 moved it into MassCore
+#endif
 #include "RammsTrafficTypes.h"
 #include "RammsTrafficSpawner.generated.h"
 

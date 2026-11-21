@@ -4,7 +4,12 @@
 
 #include "CoreMinimal.h"
 #include "Components/ActorComponent.h"
-#include "MassEntityHandle.h"
+#include "Misc/EngineVersionComparison.h"
+#if UE_VERSION_OLDER_THAN(5, 8, 0)
+	#include "MassEntityHandle.h"
+#else
+	#include "Mass/EntityHandle.h" // UE 5.8 moved it into MassCore
+#endif
 #include "Animation/TrajectoryTypes.h"
 #include "RammsCrowdStimulusTypes.h"
 #include "RammsCrowdAnimComponent.generated.h"
