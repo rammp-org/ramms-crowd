@@ -3,7 +3,12 @@
 #pragma once
 
 #include "CoreMinimal.h"
-#include "MassEntityHandle.h"
+#include "Misc/EngineVersionComparison.h"
+#if UE_VERSION_OLDER_THAN(5, 8, 0)
+	#include "MassEntityHandle.h"
+#else
+	#include "Mass/EntityHandle.h" // UE 5.8 moved it into MassCore
+#endif
 #include "MassEntityTraitBase.h"
 #include "MassEntityTypes.h"
 #include "MassTranslator.h"

@@ -6,6 +6,7 @@
 #include "Animation/Skeleton.h"
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "FileHelpers.h"
+#include "Misc/EngineVersionComparison.h"
 #include "PoseSearch/PoseSearchDatabase.h"
 #include "PoseSearch/PoseSearchDerivedData.h"
 #include "PoseSearch/PoseSearchSchema.h"
@@ -90,7 +91,7 @@ TArray<UPoseSearchDatabase*> URammsCrowdMotionMatchingLibrary::AdaptPoseSearchDa
 		int32 Kept = 0;
 		for (int32 Index = Database->GetNumAnimationAssets() - 1; Index >= 0; --Index)
 		{
-			FPoseSearchDatabaseAnimationAsset* Entry = Database->GetMutableDatabaseAnimationAsset(Index);
+			const FPoseSearchDatabaseAnimationAsset* Entry = Database->GetDatabaseAnimationAsset(Index);
 			const UObject* SourceAnim = Entry != nullptr ? Entry->AnimAsset.Get() : nullptr;
 			UObject* Twin = nullptr;
 			if (SourceAnim != nullptr)
@@ -105,8 +106,15 @@ TArray<UPoseSearchDatabase*> URammsCrowdMotionMatchingLibrary::AdaptPoseSearchDa
 				Database->RemoveAnimationAssetAt(Index);
 				continue;
 			}
-			Entry->AnimAsset = Twin;
-			Entry->MirrorOption = EPoseSearchMirrorOption::UnmirroredOnly;
+			// (A copy changed and set back: UE 5.8 hands out the database's entries read-only.)
+			FPoseSearchDatabaseAnimationAsset Changed = *Entry;
+			Changed.AnimAsset = Twin;
+			Changed.MirrorOption = EPoseSearchMirrorOption::UnmirroredOnly;
+#if UE_VERSION_OLDER_THAN(5, 8, 0)
+			*Database->GetMutableDatabaseAnimationAsset(Index) = Changed;
+#else
+			Database->SetAnimationAssetAt(Changed, Index);
+#endif
 			++Kept;
 		}
 
